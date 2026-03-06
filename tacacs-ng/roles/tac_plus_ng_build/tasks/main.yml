@@ -1,0 +1,66 @@
+---
+# Phase 1 — Build dependencies
+- name: Update apt cache
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [build, deps]
+
+- name: Install build dependencies
+  apt:
+    name:
+      - build-essential
+      - clang
+      - libpcre2-dev
+      - libc-ares-dev
+      - libssl-dev
+      - pkg-config
+    state: present
+  tags: [build, deps]
+
+# Phase 2 — Unpack source and compile
+- name: Create remote build directory
+  file:
+    path: "{{ remote_build_dir }}"
+    state: directory
+    mode: "0755"
+  tags: [build]
+
+- name: Upload and unpack source archive
+  unarchive:
+    src: "{{ role_path }}/files/tac_plus-ng-src.tar.gz"
+    dest: "{{ remote_build_dir }}"
+    extra_opts: ["--strip-components=1"]
+  tags: [build]
+
+- name: Configure build (tac_plus-ng only)
+  command: ./configure tac_plus-ng
+  args:
+    chdir: "{{ remote_build_dir }}"
+  tags: [build]
+
+- name: Compile
+  community.general.make:
+    chdir: "{{ remote_build_dir }}"
+    jobs: 1
+  tags: [build]
+
+- name: Install binaries (make install)
+  community.general.make:
+    chdir: "{{ remote_build_dir }}"
+    target: install
+  tags: [build]
+
+- name: Verify binary installed
+  stat:
+    path: "{{ tacacs_binary }}"
+  register: binary_stat
+  failed_when: not binary_stat.stat.exists
+  tags: [build]
+
+# Phase 8 — Cleanup
+- name: Remove build directory
+  file:
+    path: "{{ remote_build_dir }}"
+    state: absent
+  tags: [cleanup]

@@ -1,0 +1,3 @@
+---
+remote_build_dir: /tmp/tac-plus-ng-build
+tacacs_binary: /usr/local/sbin/tac_plus-ng

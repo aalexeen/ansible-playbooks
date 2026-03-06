@@ -1,0 +1,23 @@
+---
+# vault.yml.example — copy to vault.yml and fill in real values, then encrypt:
+#   ansible-vault encrypt vault.yml
+#
+# To edit later:
+#   ansible-vault edit vault.yml
+#
+# To generate password hashes:
+#   SHA-512: openssl passwd -6 'mypassword'
+#   SHA-256: openssl passwd -5 'mypassword'
+
+# TACACS+ shared secret — must match 'key' on all network devices
+tacacs_server_key: "CHANGE_ME_TACACS_KEY"
+
+# Local users. Each entry: name, role (admin|engineer|readonly|helpdesk), password_hash.
+tacacs_users:
+  - name: admin
+    role: admin
+    password_hash: "CHANGE_ME_HASH"   # openssl passwd -6 'password'
+
+  - name: ro-user
+    role: readonly
+    password_hash: "CHANGE_ME_HASH"

@@ -1,0 +1,67 @@
+---
+# tac_plus_ng_uninstall — remove tac_plus-ng from the target host
+# Stops the service, disables it, removes binaries, config, logs, and systemd unit.
+
+- name: Stop tac_plus-ng service
+  systemd:
+    name: tac_plus-ng
+    state: stopped
+  failed_when: false
+  tags: [never, uninstall]
+
+- name: Disable tac_plus-ng service
+  systemd:
+    name: tac_plus-ng
+    enabled: false
+  failed_when: false
+  tags: [never, uninstall]
+
+- name: Remove systemd unit file
+  file:
+    path: /etc/systemd/system/tac_plus-ng.service
+    state: absent
+  notify: Reload systemd daemon
+  tags: [never, uninstall]
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+  tags: [never, uninstall]
+
+- name: Remove binary
+  file:
+    path: "{{ tacacs_binary }}"
+    state: absent
+  tags: [never, uninstall]
+
+- name: Remove config directory
+  file:
+    path: "{{ tacacs_config_dir }}"
+    state: absent
+  tags: [never, uninstall]
+
+- name: Remove log directory
+  file:
+    path: "{{ tacacs_log_dir }}"
+    state: absent
+  tags: [never, uninstall]
+
+- name: Remove build directory (if left over)
+  file:
+    path: "{{ remote_build_dir }}"
+    state: absent
+  tags: [never, uninstall]
+
+- name: Remove build dependencies
+  apt:
+    name:
+      - build-essential
+      - clang
+      - libpcre2-dev
+      - libc-ares-dev
+      - libssl-dev
+      - pkg-config
+    state: absent
+    autoremove: true
+  when: uninstall_build_deps | bool
+  tags: [never, uninstall]

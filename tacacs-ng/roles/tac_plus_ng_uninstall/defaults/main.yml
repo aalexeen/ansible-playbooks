@@ -1,0 +1,9 @@
+---
+tacacs_binary:     /usr/local/sbin/tac_plus-ng
+tacacs_config_dir: /etc/tac_plus-ng
+tacacs_log_dir:    /var/log/tac_plus-ng
+remote_build_dir:  /tmp/tac-plus-ng-build
+
+# Build dependencies installed by tac_plus_ng_build — set to true to remove them.
+# Leave false if other software on the host depends on these packages.
+uninstall_build_deps: false

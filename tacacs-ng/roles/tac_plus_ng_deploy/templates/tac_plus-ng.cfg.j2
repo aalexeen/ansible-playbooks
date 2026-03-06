@@ -1,0 +1,206 @@
+#!../../../sbin/tac_plus-ng
+#
+# tac_plus-ng configuration
+# Target : Cisco IOS 12.2 / 16.12.x switches
+# Roles  : admin | engineer | readonly | helpdesk
+# Auth   : local users (defined in this file)
+# ---------------------------------------------------
+
+id = spawnd {
+	background = yes
+	listen { port = 49 }
+	# listen { port = 49 address = 192.168.0.0/24 }  # optional: restrict listener to mgmt subnet
+	spawn {
+		instances min = 1
+		instances max = 32
+	}
+}
+
+id = tac_plus-ng {
+	# debug = PACKET AUTHEN AUTHOR    # enable only for troubleshooting
+
+	# --- Logging ---
+	log syslog
+	log accesslog { destination = /var/log/tac_plus-ng/access.log }
+	log authorlog { destination = /var/log/tac_plus-ng/author.log }
+	log acctlog   { destination = /var/log/tac_plus-ng/acct.log   }
+
+	access log        = syslog
+	access log        = accesslog
+	authorization log = authorlog
+	accounting log    = acctlog
+
+	# ---------------------------------------------------
+	# NETWORKS
+	# ---------------------------------------------------
+
+	# RFC 1918 private ranges — used in ruleset conditions (client == private)
+	net private {
+		net rfc1918 { address = 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
+		net local   { address = 127.0.0.1 }
+	}
+
+	# ---------------------------------------------------
+	# DEVICES (Cisco switches)
+	# ---------------------------------------------------
+
+	# Matches all switches. A separate device block is only needed if a specific
+	# subnet requires a different TACACS key or banner.
+	device world {
+		address = 0.0.0.0/0
+		key = "{{ tacacs_server_key }}"
+		welcome banner = "Authorized access only. All sessions are logged.\n"
+	}
+
+	# ---------------------------------------------------
+	# PROFILES (define what an authenticated user may do)
+	# ---------------------------------------------------
+
+	# Role: admin
+	# Full access, priv-lvl 15, all commands permitted.
+	profile admin {
+		script {
+			if (service == shell) {
+				if (cmd == "") {
+					# Exec authorization on login — assign privilege level
+					set priv-lvl = 15
+					permit
+				}
+				# Command authorization — allow everything
+				permit
+			}
+		}
+	}
+
+	# Role: engineer
+	# Operational access, priv-lvl 10.
+	# Allowed  : show, ping, traceroute, interface config, VLAN, STP, write/copy.
+	# Denied   : reload, delete, format, erase, debug.
+	profile engineer {
+		script {
+			if (service == shell) {
+				if (cmd == "") {
+					set priv-lvl = 10
+					permit
+				}
+				# Allowed commands
+				if (cmd =~ /^show/)          { permit }
+				if (cmd =~ /^ping/)          { permit }
+				if (cmd =~ /^traceroute/)    { permit }
+				if (cmd =~ /^terminal/)      { permit }
+				if (cmd =~ /^exit/)          { permit }
+				if (cmd =~ /^logout/)        { permit }
+				if (cmd =~ /^end/)           { permit }
+				if (cmd =~ /^configure/)     { permit }
+				if (cmd =~ /^interface/)     { permit }
+				if (cmd =~ /^shutdown/)      { permit }
+				if (cmd =~ /^no/)            { permit }
+				if (cmd =~ /^description/)   { permit }
+				if (cmd =~ /^switchport/)    { permit }
+				if (cmd =~ /^spanning-tree/) { permit }
+				if (cmd =~ /^vlan/)          { permit }
+				if (cmd =~ /^write/)         { permit }
+				if (cmd =~ /^copy/)          { permit }
+				if (cmd =~ /^ip/)            { permit }
+				# Denied destructive commands
+				if (cmd =~ /^reload/)  { deny }
+				if (cmd =~ /^delete/)  { deny }
+				if (cmd =~ /^format/)  { deny }
+				if (cmd =~ /^erase/)   { deny }
+				if (cmd =~ /^debug/)   { deny }
+				deny
+			}
+		}
+	}
+
+	# Role: readonly
+	# View-only access. priv-lvl=15 required so IOS allows show commands.
+	# Command authorization via TACACS+ restricts what can actually be run.
+	profile readonly {
+		script {
+			if (service == shell) {
+				if (cmd == "") {
+					set priv-lvl = 15
+					permit
+				}
+				if (cmd =~ /^show/)            { permit }
+				if (cmd =~ /^exit/)            { permit }
+				if (cmd =~ /^logout/)          { permit }
+				if (cmd =~ /^terminal length/) { permit }
+				deny
+			}
+			deny
+		}
+	}
+
+	# Role: helpdesk
+	# Limited L1/L2 diagnostics. priv-lvl=15 required so IOS allows show commands.
+	# Command authorization via TACACS+ restricts to L1/L2 diagnostics only.
+	profile helpdesk {
+		script {
+			if (service == shell) {
+				if (cmd == "") {
+					set priv-lvl = 15
+					permit
+				}
+				if (cmd =~ /^show interfaces/)        { permit }
+				if (cmd =~ /^show mac/)               { permit }
+				if (cmd =~ /^show mac-address-table/) { permit }
+				if (cmd =~ /^show cdp/)               { permit }
+				if (cmd =~ /^show arp/)               { permit }
+				if (cmd =~ /^show vlan/)              { permit }
+				if (cmd =~ /^show ip interface/)      { permit }
+				if (cmd =~ /^show ip arp/)            { permit }
+				if (cmd =~ /^show version/)           { permit }
+				if (cmd =~ /^show logging/)           { permit }
+				if (cmd =~ /^ping/)                   { permit }
+				if (cmd =~ /^exit/)                   { permit }
+				if (cmd =~ /^logout/)                 { permit }
+				if (cmd =~ /^terminal length/)        { permit }
+				deny
+			}
+			deny
+		}
+	}
+
+	# ---------------------------------------------------
+	# GROUPS
+	# ---------------------------------------------------
+
+	group admin    { }
+	group engineer { }
+	group readonly { }
+	group helpdesk { }
+
+	# ---------------------------------------------------
+	# RULESET — map group membership to profile
+	# ---------------------------------------------------
+	# Rules are evaluated top-to-bottom; first match wins.
+
+	# ---------------------------------------------------
+	# USERS (local authentication)
+	# To generate a password hash:
+	#   SHA-512 : openssl passwd -6 'mypassword'  → password login = crypt HASH
+	#   SHA-256 : openssl passwd -5 'mypassword'  → password login = 5 HASH
+	# ---------------------------------------------------
+
+{% for user in tacacs_users %}
+	user {{ user.name }} {
+		password login = crypt {{ user.password_hash }}
+		member = {{ user.role }}
+	}
+
+{% endfor %}
+	ruleset {
+		rule assign-role {
+			enabled = yes
+			script {
+				if (member == admin)    { profile = admin    permit }
+				if (member == engineer) { profile = engineer permit }
+				if (member == readonly) { profile = readonly permit }
+				if (member == helpdesk) { profile = helpdesk permit }
+				deny
+			}
+		}
+	}
+}

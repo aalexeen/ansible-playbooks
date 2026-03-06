@@ -1,0 +1,4 @@
+---
+tacacs_config_dir: /etc/tac_plus-ng
+tacacs_log_dir: /var/log/tac_plus-ng
+tacacs_binary: /usr/local/sbin/tac_plus-ng

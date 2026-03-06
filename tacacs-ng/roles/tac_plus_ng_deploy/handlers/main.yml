@@ -1,0 +1,8 @@
+---
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+
+- name: Reload tac_plus-ng
+  shell: systemctl is-active tac_plus-ng && systemctl reload tac_plus-ng || true
+  changed_when: false

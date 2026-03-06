@@ -1,0 +1,39 @@
+---
+# =============================================================
+# deploy-tacacs.yml — Deploy tac_plus-ng TACACS+ server
+# =============================================================
+# Strategy: copy source from Ansible controller → compile on target
+# Rationale: ensures glibc/library compatibility; target needs
+#            only apt-available build deps; no GitHub access needed.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml --tags build
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml --tags config,service
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml --tags test
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml --tags reload
+#   ansible-playbook -i inventory.ini deploy-tacacs.yml --tags cleanup
+#
+# Roles:
+#   tac_plus_ng_build     — install build deps, compile from source, cleanup
+#   tac_plus_ng_deploy    — deploy config, systemd unit, enable/start service
+#   tac_plus_ng_test      — TCP port check, functional auth test, reload + retest
+#   tac_plus_ng_uninstall — remove everything (NEVER runs unless --tags uninstall)
+#
+# Override vars at runtime:
+#   -e tacacs_ro_password='secret'      enable functional TACACS+ auth test
+#   -e uninstall_build_deps=true        also remove build packages on uninstall
+# =============================================================
+
+- name: Deploy tac_plus-ng TACACS+ server
+  hosts: tacacs_servers
+  become: true
+
+  vars_files:
+    - ../roles/tac_plus_ng_deploy/vars/vault.yml
+
+  roles:
+    - role: tac_plus_ng_build
+    - role: tac_plus_ng_deploy
+    - role: tac_plus_ng_test
+    - role: tac_plus_ng_uninstall

@@ -1,0 +1,93 @@
+---
+# Phase 5 — TCP port check from controller
+- name: Wait for TACACS+ port 49 to be open (TCP check from controller)
+  # Built-in Ansible module — no external tools needed.
+  # delegate_to: localhost — runs FROM controller TO target:49.
+  wait_for:
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    port: 49
+    timeout: 30
+    state: started
+  delegate_to: localhost
+  become: false
+  tags: [test]
+
+- name: "Test: TCP connection to port 49 succeeded"
+  debug:
+    msg: "Port 49 is open on {{ ansible_host | default(inventory_hostname) }}"
+  tags: [test]
+
+# Phase 6 — Functional TACACS+ auth test from controller
+- name: Run functional TACACS+ auth test (from controller → target)
+  # tacacs_test.py runs on the controller; python3 must be installed there.
+  command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/tacacs_test.py"
+      - --host
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - --port
+      - "49"
+      - --key
+      - "{{ tacacs_server_key }}"
+      - --user
+      - "{{ tacacs_test_user }}"
+      - --password
+      - "{{ tacacs_test_password }}"
+  register: tacacs_test_result
+  changed_when: false
+  failed_when: tacacs_test_result.rc != 0
+  when: tacacs_test_password != ''
+  delegate_to: localhost
+  become: false
+  tags: [test]
+
+- name: Show functional test result
+  debug:
+    msg: "{{ tacacs_test_result.stdout_lines | default(['(test skipped — set tacacs_ro_password var to enable)']) }}"
+  tags: [test]
+
+# Phase 7 — Reload and retest
+- name: Reload tac_plus-ng (SIGHUP)
+  systemd:
+    name: tac_plus-ng
+    state: reloaded
+  tags: [service, reload]
+
+- name: Wait for port 49 after reload (TCP check from controller)
+  wait_for:
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    port: 49
+    timeout: 30
+    state: started
+  delegate_to: localhost
+  become: false
+  tags: [test, reload]
+
+- name: Run functional TACACS+ auth test after reload (from controller → target)
+  command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/tacacs_test.py"
+      - --host
+      - "{{ ansible_host | default(inventory_hostname) }}"
+      - --port
+      - "49"
+      - --key
+      - "{{ tacacs_server_key }}"
+      - --user
+      - "{{ tacacs_test_user }}"
+      - --password
+      - "{{ tacacs_test_password }}"
+  register: tacacs_retest_result
+  changed_when: false
+  failed_when: tacacs_retest_result.rc != 0
+  when: tacacs_test_password != ''
+  delegate_to: localhost
+  become: false
+  tags: [test, reload]
+
+- name: Show post-reload test result
+  debug:
+    msg: "{{ tacacs_retest_result.stdout_lines | default(['(test skipped — set tacacs_ro_password var to enable)']) }}"
+  tags: [test, reload]

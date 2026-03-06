@@ -1,0 +1,82 @@
+---
+# Phase 3 — Directories, config, logs
+- name: Create config directory
+  file:
+    path: "{{ tacacs_config_dir }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  tags: [config]
+
+- name: Create log directory
+  file:
+    path: "{{ tacacs_log_dir }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  tags: [config]
+
+- name: Deploy tac_plus-ng.cfg
+  template:
+    src: tac_plus-ng.cfg.j2
+    dest: "{{ tacacs_config_dir }}/tac_plus-ng.cfg"
+    owner: root
+    group: root
+    mode: "0640"
+    backup: true
+  notify: Reload tac_plus-ng
+  tags: [config]
+
+- name: Validate config syntax (dry run)
+  command: "{{ tacacs_binary }} -P {{ tacacs_config_dir }}/tac_plus-ng.cfg"
+  register: config_check
+  changed_when: false
+  failed_when: config_check.rc != 0
+  tags: [config]
+
+- name: Config syntax OK
+  debug:
+    msg: "Config validated successfully (tac_plus-ng -P exited 0)"
+  tags: [config]
+
+# Phase 4 — Systemd unit
+- name: Deploy systemd unit file
+  copy:
+    dest: /etc/systemd/system/tac_plus-ng.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=TACACS+ NG daemon (tac_plus-ng)
+      Documentation=https://github.com/MarcJHuber/event-driven-servers
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/sbin/tac_plus-ng -f {{ tacacs_config_dir }}/tac_plus-ng.cfg
+      ExecReload=/bin/kill -HUP $MAINPID
+      Restart=on-failure
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=tac_plus-ng
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Reload systemd daemon
+  tags: [service]
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+  tags: [service]
+
+- name: Enable and start tac_plus-ng
+  systemd:
+    name: tac_plus-ng
+    enabled: true
+    state: started
+  tags: [service]

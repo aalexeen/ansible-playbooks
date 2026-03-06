@@ -1,0 +1,4 @@
+---
+tacacs_test_user: "{{ tacacs_users | selectattr('role', 'equalto', 'readonly') | map(attribute='name') | first | default('') }}"
+tacacs_test_password: "{{ tacacs_ro_password | default('') }}"
+# tacacs_server_key is expected from vault.yml
