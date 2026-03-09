@@ -1,0 +1,59 @@
+---
+# 4_switch — switch authentication and exec authorization to TACACS+
+#
+# CRITICAL STEP — after this, new connections authenticate via TACACS+.
+#
+# Two-session verification:
+#   After switching, we reset the Ansible connection and reconnect using
+#   TACACS+ credentials to confirm TACACS+ authentication actually works.
+#   If reconnect fails → assert fires → outer rescue rolls everything back
+#   via local-auth reconnect (safety session).
+
+- name: "SWITCH | Switch authentication to TACACS+ (IOS XE 16)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "aaa authentication login default group {{ tacacs_server_group }} local"
+      - "aaa authorization exec default group {{ tacacs_server_group }} local if-authenticated"
+      - aaa authorization config-commands
+      - end
+  when: ios_version | int == 16
+
+- name: "SWITCH | Switch authentication to TACACS+ (IOS 12)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - aaa authentication login default group tacacs+ local
+      - aaa authorization exec default group tacacs+ local if-authenticated
+      - end
+  when: ios_version | int == 12
+
+# ── TACACS+ verification: open new session with TACACS+ credentials ────────
+# Reset forces Ansible to close current SSH connection and open a new one.
+# By overriding credentials to TACACS+ user, the new connection proves
+# that TACACS+ authentication is fully working end-to-end.
+
+- name: "SWITCH | Reset connection to force re-authentication"
+  meta: reset_connection
+
+- name: "SWITCH | Verify TACACS+ auth — reconnect as TACACS+ test user"
+  cisco.ios.ios_command:
+    commands:
+      - show privilege
+  register: tacacs_verify
+  vars:
+    ansible_user: "{{ tacacs_test_user }}"
+    ansible_password: "{{ tacacs_test_pass }}"
+
+- name: "SWITCH | Assert TACACS+ session is functional (priv 15)"
+  assert:
+    that:
+      - "'15' in tacacs_verify.stdout[0]"
+    fail_msg: >
+      TACACS+ auth session opened but privilege is not 15.
+      Output: {{ tacacs_verify.stdout[0] }}
+
+# ── Restore normal connection (main ansible_user) ─────────────────────────
+
+- name: "SWITCH | Reset connection back to main credentials"
+  meta: reset_connection

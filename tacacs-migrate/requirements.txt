@@ -1,0 +1,2 @@
+ansible>=8.0.0
+ansible-pylibssh>=1.1.0   # faster SSH for Ansible network modules

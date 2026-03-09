@@ -1,0 +1,43 @@
+---
+# 3_safeguard — configure command authorization via LOCAL (safe interim state)
+#
+# Apply command authorization BEFORE switching auth to TACACS+.
+# While auth is still local, these authorizations are safe to set.
+# This prevents a window where TACACS+ auth is active but command auth isn't.
+
+- name: "SAFEGUARD | Configure command authorization via local (interim)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - aaa authorization commands 0  default local if-authenticated
+      - aaa authorization commands 1  default local if-authenticated
+      - aaa authorization commands 5  default local none
+      - aaa authorization commands 15 default local
+      - end
+
+- name: "SAFEGUARD | Verify authorization commands are in running config"
+  cisco.ios.ios_command:
+    commands:
+      - show running-config | include aaa authorization commands
+  register: auth_cmds_check
+
+- name: "SAFEGUARD | Assert command authorization lines are present"
+  assert:
+    that:
+      - "'commands 0' in auth_cmds_check.stdout[0]"
+      - "'commands 5' in auth_cmds_check.stdout[0]"
+    fail_msg: >
+      Command authorization lines not found in running-config after applying.
+      Output: {{ auth_cmds_check.stdout[0] }}
+
+- name: "SAFEGUARD | Verify current session still works (show privilege)"
+  cisco.ios.ios_command:
+    commands:
+      - show privilege
+  register: priv_result
+
+- name: "SAFEGUARD | Assert session still at privilege 15"
+  assert:
+    that:
+      - "'15' in priv_result.stdout[0]"
+    fail_msg: "Current session privilege dropped after command auth change — rollback needed"

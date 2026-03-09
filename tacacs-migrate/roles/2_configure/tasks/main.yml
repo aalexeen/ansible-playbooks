@@ -1,0 +1,124 @@
+---
+# 2_configure — configure TACACS+ server(s) and set VTY privilege level
+#
+# Step 1: Configure TACACS+ server objects/groups and verify reachability
+# Step 2: Set privilege level 15 on all VTY lines
+#
+# IOS XE 16: named server objects + server group (TACACS-SERVERS)
+# IOS 12:    legacy tacacs-server host syntax
+# Supports 1 or 2 servers (tacacs_server_secondary optional)
+#
+# ios_command is used instead of ios_config to avoid implicit show running-config
+# calls for idempotency checks — this is a one-time migration, not a recurring task.
+
+# ── Step 1: TACACS+ servers ────────────────────────────────────────────────
+
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (IOS XE 16, 1 server)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - tacacs server TACACS-PRIMARY
+      - "  address ipv4 {{ tacacs_server_primary }}"
+      - "  key {{ tacacs_key }}"
+      - "  timeout {{ tacacs_timeout }}"
+      - exit
+      - "aaa group server tacacs+ {{ tacacs_server_group }}"
+      - "  server name TACACS-PRIMARY"
+      - end
+  when:
+    - ios_version | int == 16
+    - tacacs_server_secondary | default('') == ''
+
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (IOS XE 16, 2 servers)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - tacacs server TACACS-PRIMARY
+      - "  address ipv4 {{ tacacs_server_primary }}"
+      - "  key {{ tacacs_key }}"
+      - "  timeout {{ tacacs_timeout }}"
+      - exit
+      - tacacs server TACACS-SECONDARY
+      - "  address ipv4 {{ tacacs_server_secondary }}"
+      - "  key {{ tacacs_key }}"
+      - "  timeout {{ tacacs_timeout }}"
+      - exit
+      - "aaa group server tacacs+ {{ tacacs_server_group }}"
+      - "  server name TACACS-PRIMARY"
+      - "  server name TACACS-SECONDARY"
+      - end
+  when:
+    - ios_version | int == 16
+    - tacacs_server_secondary | default('') != ''
+
+- name: "CONFIGURE | Configure TACACS+ server(s) (IOS 12, 1 server)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+      - "tacacs-server timeout {{ tacacs_timeout }}"
+      - end
+  when:
+    - ios_version | int == 12
+    - tacacs_server_secondary | default('') == ''
+
+- name: "CONFIGURE | Configure TACACS+ server(s) (IOS 12, 2 servers)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+      - "tacacs-server host {{ tacacs_server_secondary }} key {{ tacacs_key }}"
+      - "tacacs-server timeout {{ tacacs_timeout }}"
+      - end
+  when:
+    - ios_version | int == 12
+    - tacacs_server_secondary | default('') != ''
+
+- name: "CONFIGURE | Verify TACACS+ reachability (IOS XE 16)"
+  cisco.ios.ios_command:
+    commands:
+      - "test aaa group {{ tacacs_server_group }} {{ tacacs_test_user }} {{ tacacs_test_pass }} new-code"
+  register: aaa_test_16
+  when: ios_version | int == 16
+
+- name: "CONFIGURE | Verify TACACS+ reachability (IOS 12)"
+  cisco.ios.ios_command:
+    commands:
+      - "test aaa group tacacs+ {{ tacacs_test_user }} {{ tacacs_test_pass }} legacy"
+  register: aaa_test_12
+  when: ios_version | int == 12
+
+- name: "CONFIGURE | Assert TACACS+ authentication succeeded"
+  assert:
+    that:
+      - >
+        (aaa_test_16 is not skipped and 'successfully authenticated' in (aaa_test_16.stdout[0] | lower))
+        or
+        (aaa_test_12 is not skipped and 'successfully authenticated' in (aaa_test_12.stdout[0] | lower))
+    fail_msg: >
+      TACACS+ server did not respond or authentication failed.
+      Output: {{ aaa_test_16.stdout[0] if (aaa_test_16 is not skipped) else aaa_test_12.stdout[0] }}
+
+# ── Step 2: VTY privilege level ────────────────────────────────────────────
+
+- name: "CONFIGURE | Set privilege level 15 on VTY lines"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - line vty 0 4
+      - "  privilege level 15"
+      - line vty 5 15
+      - "  privilege level 15"
+      - end
+
+- name: "CONFIGURE | Verify privilege level 15 in running config"
+  cisco.ios.ios_command:
+    commands:
+      - show running-config | include privilege level
+  register: priv_check
+
+- name: "CONFIGURE | Assert privilege level 15 is set"
+  assert:
+    that:
+      - "'privilege level 15' in priv_check.stdout[0]"
+    fail_msg: "privilege level 15 not found in running-config after applying"

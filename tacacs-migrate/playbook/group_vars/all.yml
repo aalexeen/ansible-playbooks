@@ -1,0 +1,11 @@
+---
+# Global defaults for all hosts — applied across all roles.
+# Override per host or group in inventory if needed.
+
+# Named TACACS+ server group (IOS XE 16 only)
+tacacs_server_group: "TACACS-SERVERS"
+
+# Timeout for each TACACS+ server (seconds)
+tacacs_timeout: 3
+
+# ios_version is set per inventory group (12 or 16) — do not set here

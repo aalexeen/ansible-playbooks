@@ -1,0 +1,9 @@
+# Secrets — never commit these
+playbook/vars/vault.yml
+vars.env
+*.vault
+.vault_pass
+vault_pass
+
+# Ansible runtime files
+*.retry

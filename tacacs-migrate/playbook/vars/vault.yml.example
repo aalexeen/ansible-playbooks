@@ -1,0 +1,25 @@
+---
+# vault.yml — secrets for TACACS+ migration, encrypted with ansible-vault
+# DO NOT commit the real vault.yml to git
+# To edit : ansible-vault edit playbook/vars/vault.yml
+# To view : ansible-vault view playbook/vars/vault.yml
+
+# Local credentials on the switches (used for safety session + rollback)
+local_user:          "admin"
+local_pass:          "CHANGE_ME"
+local_enable:        "CHANGE_ME_ENABLE"
+# Secret for recreating admin user with privilege 15 during preflight (type 9 hash or plaintext)
+local_admin_secret:  "CHANGE_ME_ADMIN_SECRET"
+
+# TACACS+ shared key — must match key on tac_plus-ng server
+tacacs_key: "CHANGE_ME_TACACS_KEY"
+
+# TACACS+ test user for verification (readonly user is ideal)
+tacacs_test_user: "htc-ro"
+tacacs_test_pass: "CHANGE_ME"
+
+# Primary TACACS+ server
+tacacs_server_primary: "CHANGE_ME_PRIMARY_IP"
+
+# Secondary TACACS+ server (optional — leave empty to use single server)
+tacacs_server_secondary: ""

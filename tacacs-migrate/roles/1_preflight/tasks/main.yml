@@ -1,0 +1,104 @@
+---
+# 1_preflight — validate variables, detect IOS version, ensure admin has privilege 15
+#
+# ios_version is auto-detected from "show version" and set as a host fact
+# available to all subsequent roles in the play:
+#   16 — IOS XE (named server objects, aaa group server tacacs+)
+#   12 — classic IOS (tacacs-server host legacy syntax)
+
+- name: "PREFLIGHT | Validate required variables"
+  assert:
+    that:
+      - local_user is defined
+      - local_pass is defined
+      - local_admin_secret is defined
+      - tacacs_key is defined
+      - tacacs_test_user is defined
+      - tacacs_test_pass is defined
+    fail_msg: "Required migration variables are not defined"
+
+# ── IOS version auto-detection ─────────────────────────────────────────────
+
+- name: "PREFLIGHT | Get IOS version info"
+  cisco.ios.ios_command:
+    commands:
+      - show version
+  register: show_version_output
+
+- name: "PREFLIGHT | Detect IOS version"
+  set_fact:
+    ios_version: "{{ (16 if ('IOS XE' in show_version_output.stdout[0] or 'Version 16.' in show_version_output.stdout[0] or 'Version 17.' in show_version_output.stdout[0]) else 12) | int }}"
+
+- name: "PREFLIGHT | Show detected IOS version"
+  debug:
+    msg: "Detected IOS version: {{ ios_version }} ({{ 'IOS XE' if ios_version | int == 16 else 'classic IOS' }})"
+
+# ── Check admin user privilege level ──────────────────────────────────────
+
+- name: "PREFLIGHT | Get admin user line from running config"
+  cisco.ios.ios_command:
+    commands:
+      - show running-config | include ^username admin privilege
+  register: admin_user_line
+
+- name: "PREFLIGHT | Check if admin has privilege 15"
+  set_fact:
+    admin_has_priv15: "{{ 'privilege 15' in admin_user_line.stdout[0] }}"
+
+# ── Update admin user with privilege 15 if needed ─────────────────────────
+# IOS/IOS XE supports overwriting an existing username in-place.
+
+- name: "PREFLIGHT | Set admin user privilege 15 and secret"
+  cisco.ios.ios_config:
+    lines:
+      - username admin privilege 15 secret {{ local_admin_secret }}
+  when: not admin_has_priv15
+
+# ── Verify ────────────────────────────────────────────────────────────────
+
+- name: "PREFLIGHT | Verify admin user has privilege 15"
+  cisco.ios.ios_command:
+    commands:
+      - show running-config | include ^username admin privilege
+  register: admin_verify
+
+- name: "PREFLIGHT | Assert admin user has privilege 15"
+  assert:
+    that:
+      - "'privilege 15' in admin_verify.stdout[0]"
+    fail_msg: >
+      Admin user does not have privilege 15 after fix attempt.
+      Output: {{ admin_verify.stdout[0] }}
+
+# ── Verify local safety session ────────────────────────────────────────────
+# Open a new connection with local credentials and confirm privilege 15.
+# This proves the rollback safety session will work if migration fails.
+
+- name: "PREFLIGHT | Reset connection to test local credentials"
+  meta: reset_connection
+  vars:
+    ansible_user: "{{ local_user }}"
+    ansible_password: "{{ local_pass }}"
+    ansible_become_pass: "{{ local_enable | default('') }}"
+
+- name: "PREFLIGHT | Verify local safety session — check privilege"
+  cisco.ios.ios_command:
+    commands:
+      - show privilege
+  register: safety_session_check
+  vars:
+    ansible_user: "{{ local_user }}"
+    ansible_password: "{{ local_pass }}"
+    ansible_become_pass: "{{ local_enable | default('') }}"
+
+- name: "PREFLIGHT | Assert local safety session has privilege 15"
+  assert:
+    that:
+      - "'15' in safety_session_check.stdout[0]"
+    fail_msg: >
+      Local credentials cannot open a privilege 15 session.
+      Rollback safety session will not work — fix before migrating.
+      Output: {{ safety_session_check.stdout[0] }}
+
+- name: "PREFLIGHT | Restore main connection"
+  meta: reset_connection

@@ -1,0 +1,144 @@
+---
+# 5_finalize — switch command authorization to TACACS+, configure accounting, save
+#
+# Step 6: Replace interim LOCAL command authorization with TACACS+
+#   IOS/IOS XE overwrites existing authorization rules in-place — no "no" needed.
+#   This avoids a window with no command authorization between removal and re-application.
+#   Failsafe levels:
+#     0, 1: if-authenticated  → exit/logout work even if TACACS+ down
+#     5:    none              → show/conf t work when TACACS+ down (engineer fallback)
+#     15:   (no fallback)     → reload/erase blocked when TACACS+ down
+#
+# Step 7: Configure exec + command accounting
+# Step 8: Full AAA verification via new session before saving
+# Step 9: Save running config to NVRAM
+
+# ── Step 6: Switch command authorization to TACACS+ ────────────────────────
+
+- name: "FINALIZE | Apply TACACS+ command authorization (IOS XE 16)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "aaa authorization commands 0  default group {{ tacacs_server_group }} if-authenticated"
+      - "aaa authorization commands 1  default group {{ tacacs_server_group }} if-authenticated"
+      - "aaa authorization commands 5  default group {{ tacacs_server_group }} none"
+      - "aaa authorization commands 15 default group {{ tacacs_server_group }}"
+      - end
+  when: ios_version | int == 16
+
+- name: "FINALIZE | Apply TACACS+ command authorization (IOS 12)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - aaa authorization commands 0  default group tacacs+ if-authenticated
+      - aaa authorization commands 1  default group tacacs+ if-authenticated
+      - aaa authorization commands 5  default group tacacs+ none
+      - aaa authorization commands 15 default group tacacs+
+      - end
+  when: ios_version | int == 12
+
+- name: "FINALIZE | Verify current session commands still work"
+  cisco.ios.ios_command:
+    commands:
+      - show privilege
+  register: step6_priv
+
+- name: "FINALIZE | Assert session still functional after command auth switch"
+  assert:
+    that:
+      - "'15' in step6_priv.stdout[0]"
+    fail_msg: "Session dropped or privilege changed after switching command auth to TACACS+"
+
+# ── Step 7: Accounting ─────────────────────────────────────────────────────
+
+- name: "FINALIZE | Configure accounting (IOS XE 16)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "aaa accounting exec default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 0  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 1  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 5  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 15 default start-stop group {{ tacacs_server_group }}"
+      - end
+  when: ios_version | int == 16
+
+- name: "FINALIZE | Configure accounting (IOS 12)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - aaa accounting exec default start-stop group tacacs+
+      - aaa accounting commands 0  default start-stop group tacacs+
+      - aaa accounting commands 1  default start-stop group tacacs+
+      - aaa accounting commands 5  default start-stop group tacacs+
+      - aaa accounting commands 15 default start-stop group tacacs+
+      - end
+  when: ios_version | int == 12
+
+- name: "FINALIZE | Verify accounting config is present"
+  cisco.ios.ios_command:
+    commands:
+      - show running-config | include aaa accounting
+  register: acct_check
+
+- name: "FINALIZE | Assert accounting exec and commands are configured"
+  assert:
+    that:
+      - "'accounting exec default' in acct_check.stdout[0]"
+      - "'accounting commands' in acct_check.stdout[0]"
+    fail_msg: "Accounting lines not found in running-config after applying"
+
+# ── Step 8: Full AAA verification via new session ──────────────────────────
+# Reset forces a new connection using local_user credentials via TACACS+ auth.
+# Proves that authentication + command authorization are fully functional.
+# If this fails → assert fires → rescue rolls everything back → config NOT saved.
+
+- name: "FINALIZE | Reset connection for full AAA verification"
+  meta: reset_connection
+
+- name: "FINALIZE | Verify full AAA — reconnect as admin via TACACS+"
+  cisco.ios.ios_command:
+    commands:
+      - show privilege
+  register: final_verify
+  vars:
+    ansible_user: "{{ local_user }}"
+    ansible_password: "{{ local_pass }}"
+    ansible_become_pass: "{{ local_enable | default('') }}"
+
+- name: "FINALIZE | Assert admin TACACS+ session has privilege 15"
+  assert:
+    that:
+      - "'15' in final_verify.stdout[0]"
+    fail_msg: >
+      Full AAA verification failed — admin session did not reach privilege 15 via TACACS+.
+      Config will NOT be saved. Output: {{ final_verify.stdout[0] }}
+
+- name: "FINALIZE | Reset connection back to main credentials"
+  meta: reset_connection
+
+# ── Step 9: Save ───────────────────────────────────────────────────────────
+
+- name: "FINALIZE | Save configuration (write memory)"
+  cisco.ios.ios_command:
+    commands:
+      - write memory
+  register: save_result
+
+- name: "FINALIZE | Assert config was saved"
+  assert:
+    that:
+      - >
+        'ok' in (save_result.stdout[0] | lower)
+        or '[ok]' in (save_result.stdout[0] | lower)
+        or 'building' in (save_result.stdout[0] | lower)
+    fail_msg: "Config save may have failed. Output: {{ save_result.stdout[0] }}"
+
+- name: "FINALIZE | Migration complete"
+  debug:
+    msg: >
+      ══════════════════════════════════════════
+      Migration SUCCEEDED: {{ inventory_hostname }}
+      IOS version: {{ ios_version }}
+      TACACS+ servers: {{ tacacs_server_primary }}, {{ tacacs_server_secondary }}
+      ══════════════════════════════════════════

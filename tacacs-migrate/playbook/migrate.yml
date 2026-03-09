@@ -1,0 +1,62 @@
+---
+# =============================================================
+# migrate.yml — Migrate Cisco IOS/IOS XE switches to TACACS+ AAA
+# =============================================================
+# Usage:
+#   ansible-playbook -i ../inventory/hosts migrate.yml
+#   Single host:
+#   ansible-playbook -i ../inventory/hosts migrate.yml -l AA01ASWI
+#
+# Two-session safety model:
+#   WORK SESSION  — Ansible normal network_cli connection (current user)
+#   SAFETY SESSION — block/rescue overrides ansible_user/password to local
+#                    credentials, forcing a new local-auth connection for
+#                    rollback if any step fails.
+#
+# Override vars at runtime:
+#   -e serial=5          run on 5 switches in parallel (default: 1)
+# =============================================================
+
+- name: Migrate switches to TACACS+ AAA
+  hosts: switches
+  gather_facts: false
+  connection: network_cli
+  serial: "{{ serial | default(1) }}"
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_become: true
+    ansible_become_method: enable
+    ansible_become_pass: "{{ local_enable | default('') }}"
+
+  vars_files:
+    - vars/vault.yml
+
+  tasks:
+    - name: "MIGRATE | Run migration with rollback protection"
+      block:
+
+        - name: "MIGRATE | Phase 1 — preflight: validate variables and local user safety"
+          import_role:
+            name: 1_preflight
+
+        - name: "MIGRATE | Phase 2 — configure: TACACS+ servers and VTY privilege"
+          import_role:
+            name: 2_configure
+
+        - name: "MIGRATE | Phase 3 — safeguard: interim local command authorization"
+          import_role:
+            name: 3_safeguard
+
+        - name: "MIGRATE | Phase 4 — switch: enable TACACS+ authentication (CRITICAL)"
+          import_role:
+            name: 4_switch
+
+        - name: "MIGRATE | Phase 5 — finalize: TACACS+ command authz, accounting, save"
+          import_role:
+            name: 5_finalize
+
+      rescue:
+        - name: "MIGRATE | Phase 6 — rollback: revert to local authentication"
+          import_role:
+            name: 6_rollback
