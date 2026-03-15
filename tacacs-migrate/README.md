@@ -8,16 +8,17 @@ Supports classic IOS (12.x) and IOS XE (16.x/17.x). Works with one or two TACACS
 
 ## What it does
 
-Migrates AAA on each switch in six phases:
+Migrates AAA on each switch in five phases plus automatic rollback:
 
-1. **Preflight** — validates variables, ensures the local admin user has privilege 15, verifies that a local safety session can be opened (rollback will work)
-2. **Configure** — adds the TACACS+ server(s) to the switch, tests authentication against the server
-3. **Safeguard** — applies command authorization via local auth (interim safe state before switching)
-4. **Switch** — switches `aaa authentication login default` and `aaa authorization exec default` to TACACS+, then immediately reconnects as a TACACS+ test user to verify
-5. **Finalize** — switches command authorization to TACACS+, enables accounting, does a final reconnect verification, saves config
-6. **Rollback** (rescue) — if any phase fails, automatically reconnects via local credentials and reverts all AAA changes, then removes TACACS+ server config and saves
+1. **Broker open** — opens a persistent SSH safety session to the switch via ssh-broker using local credentials; this session is independent of Ansible's connection and survives any AAA changes
+2. **Preflight** — validates variables, checks IOS version, ensures the local admin user has privilege 15
+3. **Configure** — adds TACACS+ server(s), tests reachability; supports legacy IOS 12 syntax (`tacacs-server host`) and modern IOS XE 16+ named objects (`tacacs server`)
+4. **Safeguard** — applies interim command authorization via local auth (safe state before switching)
+5. **Switch** — enables TACACS+ authentication and exec authorization, verifies login via test user
+6. **Finalize** — switches command authorization to TACACS+, enables accounting, final verification, saves config
+7. **Rollback** (rescue, automatic) — if any phase fails, sends rollback commands through the broker safety session to revert all AAA changes and remove TACACS+ server config, then saves
 
-Config is **never saved** until phase 5 is fully verified. If anything goes wrong before that, rollback fires and the switch is left unchanged.
+Config is **never saved** until phase 6 is fully verified. If anything goes wrong before that, rollback fires automatically and the switch is left exactly as it was.
 
 ---
 
@@ -28,11 +29,12 @@ Config is **never saved** until phase 5 is fully verified. If anything goes wron
 - `cisco.ios` collection: `ansible-galaxy collection install cisco.ios`
 - `community.general` collection: `ansible-galaxy collection install community.general`
 - `ansible-vault` (included with Ansible)
+- **ssh-broker** running on the controller (provides the safety session for rollback)
 
 **Switches:**
 - Cisco IOS 12.x or IOS XE 16.x / 17.x
-- SSH access with a local admin user
-- `aaa new-model` already configured
+- SSH or Telnet access with a local admin user
+- `aaa new-model` already configured (or will be applied during migration)
 - TACACS+ server reachable from the switch
 
 ---
@@ -99,9 +101,18 @@ After installation, use the management script at the install directory:
 ./tacacs-migrate.sh run -l SW01       # migrate a single switch
 ./tacacs-migrate.sh configure         # reconfigure all settings
 ./tacacs-migrate.sh configure-vault   # reconfigure secrets only
+./tacacs-migrate.sh configure-broker  # reconfigure ssh-broker URL and token
 ./tacacs-migrate.sh configure-hosts   # edit switch inventory
 ./tacacs-migrate.sh status            # show current config and vault state
 ./tacacs-migrate.sh vault-rekey       # change vault password
+```
+
+Runtime overrides:
+
+```bash
+./tacacs-migrate.sh run -e serial=5                    # 5 switches in parallel
+./tacacs-migrate.sh run -e broker_session_timeout=900  # broker idle timeout (default: 600s)
+./tacacs-migrate.sh run -l SW01 -e connection_mode=telnet  # force Telnet for a host
 ```
 
 ---
@@ -112,6 +123,8 @@ All sensitive values are stored encrypted with `ansible-vault`. The vault contai
 
 | Variable | Description |
 |---|---|
+| `broker_url` | ssh-broker URL (e.g. `http://127.0.0.1:8765`) |
+| `broker_token` | ssh-broker API token |
 | `local_user` | Local admin username on switches |
 | `local_pass` | Local admin password |
 | `local_enable` | Enable secret (if required) |
@@ -161,13 +174,23 @@ The fallback chain (`local`, `if-authenticated`, `none`) ensures you can still l
 
 The playbook uses a two-session approach:
 
-- **Work session** — Ansible's normal SSH connection used throughout migration
-- **Safety session** — a separate connection opened with local credentials before any AAA changes are made; proves rollback will succeed
+- **Work session** — Ansible's normal `network_cli` SSH connection (or a Telnet broker session for Telnet-only devices)
+- **Safety session** — a persistent SSH session opened via ssh-broker before any AAA changes, using local credentials; completely independent of Ansible's connection and survives AAA reconfiguration
 
-If migration fails at any point before `write memory`, the rescue block:
-1. Opens a new connection using local credentials (bypassing any broken TACACS+ state)
-2. Reverts `aaa authentication` and `aaa authorization` to local
-3. Removes TACACS+ server configuration from the switch
-4. Saves the config
+If migration fails at any point before `write memory`, the rescue block sends rollback commands directly through the broker safety session:
+1. Reverts `aaa authentication` and `aaa authorization` to local
+2. Removes TACACS+ server configuration from the switch
+3. Saves the config
 
 The switch is left exactly as it was before the playbook ran.
+
+Per-host log files are written to `../logs/<hostname>_<timestamp>.log` on the controller regardless of success or failure.
+
+### IOS version branching
+
+| Branch | Versions | TACACS+ syntax |
+|---|---|---|
+| `legacy` | IOS 12.x – 15.x | `tacacs-server host <IP> key <key>` |
+| `modern` | IOS XE 16.x / 17.x | `tacacs server <name>` (named object) |
+
+On legacy devices the playbook first tries the per-host key syntax (`tacacs-server host <IP> key <key>`); if the device rejects it, it falls back to the separate global key syntax (`tacacs-server key <key>`) automatically.
