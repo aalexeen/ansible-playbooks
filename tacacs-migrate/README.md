@@ -10,7 +10,7 @@ Supports classic IOS (12.x) and IOS XE (16.x/17.x). Works with one or two TACACS
 
 Migrates AAA on each switch in five phases plus automatic rollback:
 
-1. **Broker open** — opens a persistent SSH safety session to the switch via ssh-broker using local credentials; this session is independent of Ansible's connection and survives any AAA changes
+1. **Broker open** — opens a persistent SSH safety session to the switch via netdev-broker using local credentials; this session is independent of Ansible's connection and survives any AAA changes
 2. **Preflight** — validates variables, checks IOS version, ensures the local admin user has privilege 15
 3. **Configure** — adds TACACS+ server(s), tests reachability; supports legacy IOS 12 syntax (`tacacs-server host`) and modern IOS XE 16+ named objects (`tacacs server`)
 4. **Safeguard** — applies interim command authorization via local auth (safe state before switching)
@@ -29,7 +29,7 @@ Config is **never saved** until phase 6 is fully verified. If anything goes wron
 - `cisco.ios` collection: `ansible-galaxy collection install cisco.ios`
 - `community.general` collection: `ansible-galaxy collection install community.general`
 - `ansible-vault` (included with Ansible)
-- **ssh-broker** running on the controller (provides the safety session for rollback)
+- **netdev-broker** running on the controller (provides the safety session for rollback)
 
 **Switches:**
 - Cisco IOS 12.x or IOS XE 16.x / 17.x
@@ -101,7 +101,7 @@ After installation, use the management script at the install directory:
 ./tacacs-migrate.sh run -l SW01       # migrate a single switch
 ./tacacs-migrate.sh configure         # reconfigure all settings
 ./tacacs-migrate.sh configure-vault   # reconfigure secrets only
-./tacacs-migrate.sh configure-broker  # reconfigure ssh-broker URL and token
+./tacacs-migrate.sh configure-broker  # reconfigure netdev-broker URL and token
 ./tacacs-migrate.sh configure-hosts   # edit switch inventory
 ./tacacs-migrate.sh status            # show current config and vault state
 ./tacacs-migrate.sh vault-rekey       # change vault password
@@ -123,8 +123,8 @@ All sensitive values are stored encrypted with `ansible-vault`. The vault contai
 
 | Variable | Description |
 |---|---|
-| `broker_url` | ssh-broker URL (e.g. `http://127.0.0.1:8765`) |
-| `broker_token` | ssh-broker API token |
+| `broker_url` | netdev-broker URL (e.g. `http://127.0.0.1:8765`) |
+| `broker_token` | netdev-broker API token |
 | `local_user` | Local admin username on switches |
 | `local_pass` | Local admin password |
 | `local_enable` | Enable secret (if required) |
@@ -175,7 +175,7 @@ The fallback chain (`local`, `if-authenticated`, `none`) ensures you can still l
 The playbook uses a two-session approach:
 
 - **Work session** — Ansible's normal `network_cli` SSH connection (or a Telnet broker session for Telnet-only devices)
-- **Safety session** — a persistent SSH session opened via ssh-broker before any AAA changes, using local credentials; completely independent of Ansible's connection and survives AAA reconfiguration
+- **Safety session** — a persistent SSH session opened via netdev-broker before any AAA changes, using local credentials; completely independent of Ansible's connection and survives AAA reconfiguration
 
 If migration fails at any point before `write memory`, the rescue block sends rollback commands directly through the broker safety session:
 1. Reverts `aaa authentication` and `aaa authorization` to local
