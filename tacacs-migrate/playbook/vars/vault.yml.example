@@ -4,17 +4,24 @@
 # To edit : ansible-vault edit playbook/vars/vault.yml
 # To view : ansible-vault view playbook/vars/vault.yml
 
-# Local credentials on the switches (used for safety session + rollback)
-local_user:          "admin"
-local_pass:          "CHANGE_ME"
-local_enable:        "CHANGE_ME_ENABLE"
-# Secret for recreating admin user with privilege 15 during preflight (type 9 hash or plaintext)
-local_admin_secret:  "CHANGE_ME_ADMIN_SECRET"
+# ── ssh-broker safety session ──────────────────────────────────────────────
+# ssh-broker must be running on the Ansible controller before migration starts.
+broker_url:   "http://127.0.0.1:8765"
+broker_token: "CHANGE_ME_BROKER_TOKEN"
 
-# TACACS+ shared key — must match key on tac_plus-ng server
+# ── Local credentials on the switches ─────────────────────────────────────
+# Used to open the broker safety session and for rollback.
+local_user:         "admin"
+local_pass:         "CHANGE_ME"
+local_enable:       "CHANGE_ME_ENABLE"
+# Secret for recreating admin user with privilege 15 during preflight (type 9 hash or plaintext)
+local_admin_secret: "CHANGE_ME_ADMIN_SECRET"
+
+# ── TACACS+ ────────────────────────────────────────────────────────────────
+# Shared key — must match key on tac_plus-ng server
 tacacs_key: "CHANGE_ME_TACACS_KEY"
 
-# TACACS+ test user for verification (readonly user is ideal)
+# Test user for TACACS+ reachability verification (readonly user is ideal)
 tacacs_test_user: "htc-ro"
 tacacs_test_pass: "CHANGE_ME"
 

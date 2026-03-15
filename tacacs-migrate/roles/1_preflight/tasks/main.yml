@@ -1,10 +1,13 @@
 ---
-# 1_preflight — validate variables, detect IOS version, ensure admin has privilege 15
+# 1_preflight — validate variables, detect IOS version, ensure admin has privilege 15,
+#               check device is free of existing TACACS+ config.
 #
-# ios_version is auto-detected from "show version" and set as a host fact
-# available to all subsequent roles in the play:
-#   16 — IOS XE (named server objects, aaa group server tacacs+)
-#   12 — classic IOS (tacacs-server host legacy syntax)
+# connection_mode=ssh    → cisco.ios.ios_command (network_cli)
+# connection_mode=telnet → ansible.builtin.uri → broker /telnet-session/{work_session_id}/exec
+#
+# ios_major / ios_minor / ios_branch are set as host facts for all subsequent roles.
+#
+# If existing TACACS+ config is detected — log, close broker sessions, end_host.
 
 - name: "PREFLIGHT | Validate required variables"
   assert:
@@ -15,90 +18,180 @@
       - tacacs_key is defined
       - tacacs_test_user is defined
       - tacacs_test_pass is defined
+      - broker_url is defined
+      - broker_token is defined
     fail_msg: "Required migration variables are not defined"
 
 # ── IOS version auto-detection ─────────────────────────────────────────────
 
-- name: "PREFLIGHT | Get IOS version info"
+- name: "PREFLIGHT | Get IOS version info (SSH)"
   cisco.ios.ios_command:
     commands:
       - show version
   register: show_version_output
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "PREFLIGHT | Detect IOS version"
+- name: "PREFLIGHT | Get IOS version info (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show version
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: show_version_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "PREFLIGHT | Normalize show version output"
   set_fact:
-    ios_version: "{{ (16 if ('IOS XE' in show_version_output.stdout[0] or 'Version 16.' in show_version_output.stdout[0] or 'Version 17.' in show_version_output.stdout[0]) else 12) | int }}"
+    _show_version_text: >-
+      {{ show_version_output.stdout[0]
+         if connection_mode | default('ssh') == 'ssh'
+         else show_version_telnet.json.outputs['show version'] }}
 
-- name: "PREFLIGHT | Show detected IOS version"
+- name: "PREFLIGHT | Parse IOS major and minor version"
+  set_fact:
+    ios_major: "{{ _show_version_text | regex_search('Version (\\d+)\\.', '\\1') | first | int }}"
+    ios_minor: "{{ _show_version_text | regex_search('Version \\d+\\.(\\d+)', '\\1') | first | int }}"
+
+- name: "PREFLIGHT | Determine IOS syntax branch"
+  set_fact:
+    ios_branch: "{{ 'legacy' if (ios_major | int <= 15) else 'modern' }}"
+
+- name: "PREFLIGHT | Show detected IOS version and branch"
   debug:
-    msg: "Detected IOS version: {{ ios_version }} ({{ 'IOS XE' if ios_version | int == 16 else 'classic IOS' }})"
+    msg: >
+      Detected IOS version: {{ ios_major }}.{{ ios_minor }}
+      Branch: {{ ios_branch }}
+      Connection: {{ connection_mode | default('ssh') }}
+      (legacy = IOS <=15   → tacacs-server host / group tacacs+
+       modern = IOS XE 16+ → tacacs server <name> / group <tacacs_server_group>)
 
-# ── Check admin user privilege level ──────────────────────────────────────
+# ── Ensure admin user exists with privilege 15 and secret ─────────────────
+# Drop and recreate the user unconditionally: IOS rejects adding a secret
+# to a user that already has a password (and vice versa), so we must remove
+# the old entry first regardless of its current form.
 
-- name: "PREFLIGHT | Get admin user line from running config"
+- name: "PREFLIGHT | Recreate admin user with privilege 15 and secret (SSH)"
   cisco.ios.ios_command:
     commands:
-      - show running-config | include ^username admin privilege
-  register: admin_user_line
-
-- name: "PREFLIGHT | Check if admin has privilege 15"
-  set_fact:
-    admin_has_priv15: "{{ 'privilege 15' in admin_user_line.stdout[0] }}"
-
-# ── Update admin user with privilege 15 if needed ─────────────────────────
-# IOS/IOS XE supports overwriting an existing username in-place.
-
-- name: "PREFLIGHT | Set admin user privilege 15 and secret"
-  cisco.ios.ios_config:
-    lines:
+      - configure terminal
+      - command: no username admin
+        prompt: '\[confirm\]'
+        answer: "\r"
       - username admin privilege 15 secret {{ local_admin_secret }}
-  when: not admin_has_priv15
+      - end
+  when: connection_mode | default('ssh') == 'ssh'
 
-# ── Verify ────────────────────────────────────────────────────────────────
+- name: "PREFLIGHT | Recreate admin user with privilege 15 and secret (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - cmd: no username admin
+          send_newlines: 2
+        - "username admin privilege 15 secret {{ local_admin_secret }}"
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: _recreate_admin_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
 
-- name: "PREFLIGHT | Verify admin user has privilege 15"
+# ── Check device is clean of existing TACACS+ config ──────────────────────
+# If TACACS+ config is already present, skip this host to avoid conflicts.
+# Both broker sessions are closed before skipping.
+
+- name: "PREFLIGHT | Check for existing TACACS+ config (SSH)"
   cisco.ios.ios_command:
     commands:
-      - show running-config | include ^username admin privilege
-  register: admin_verify
+      - show running-config | include tacacs
+  register: tacacs_existing_ssh
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "PREFLIGHT | Assert admin user has privilege 15"
-  assert:
-    that:
-      - "'privilege 15' in admin_verify.stdout[0]"
-    fail_msg: >
-      Admin user does not have privilege 15 after fix attempt.
-      Output: {{ admin_verify.stdout[0] }}
+- name: "PREFLIGHT | Check for existing TACACS+ config (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show running-config | include tacacs
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: tacacs_existing_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
 
-# ── Verify local safety session ────────────────────────────────────────────
-# Open a new connection with local credentials and confirm privilege 15.
-# This proves the rollback safety session will work if migration fails.
+- name: "PREFLIGHT | Normalize existing TACACS check output"
+  set_fact:
+    _tacacs_existing_text: >-
+      {{ tacacs_existing_ssh.stdout[0]
+         if connection_mode | default('ssh') == 'ssh'
+         else tacacs_existing_telnet.json.outputs['show running-config | include tacacs'] }}
 
-- name: "PREFLIGHT | Reset connection to test local credentials"
-  meta: reset_connection
-  vars:
-    ansible_user: "{{ local_user }}"
-    ansible_password: "{{ local_pass }}"
-    ansible_become_pass: "{{ local_enable | default('') }}"
+- name: "PREFLIGHT | Handle existing TACACS+ config — log, close broker sessions, skip host"
+  when: _tacacs_existing_text | trim != ''
+  block:
 
-- name: "PREFLIGHT | Verify local safety session — check privilege"
-  cisco.ios.ios_command:
-    commands:
-      - show privilege
-  register: safety_session_check
-  vars:
-    ansible_user: "{{ local_user }}"
-    ansible_password: "{{ local_pass }}"
-    ansible_become_pass: "{{ local_enable | default('') }}"
+    - name: "PREFLIGHT | Write skip log entry to controller"
+      ansible.builtin.copy:
+        content: |
+          ============================================================
+          HOST:      {{ inventory_hostname }}
+          STATUS:    SKIPPED — existing TACACS+ config detected
+          TIMESTAMP: {{ _ts }}
+          IOS:       {{ ios_major }}.{{ ios_minor }} (branch: {{ ios_branch }})
+          ------------------------------------------------------------
+          Device already has TACACS+ configuration. Clean up manually
+          before running migration.
+          Existing config lines:
+          {{ _tacacs_existing_text }}
+          ============================================================
+        dest: "{{ _log_dir }}/{{ inventory_hostname }}_{{ _ts }}.log"
+        mode: "0640"
+      delegate_to: localhost
 
-- name: "PREFLIGHT | Assert local safety session has privilege 15"
-  assert:
-    that:
-      - "'15' in safety_session_check.stdout[0]"
-    fail_msg: >
-      Local credentials cannot open a privilege 15 session.
-      Rollback safety session will not work — fix before migrating.
-      Output: {{ safety_session_check.stdout[0] }}
+    - name: "PREFLIGHT | Print skip notice"
+      debug:
+        msg: >
+          HOST {{ inventory_hostname }} SKIPPED — existing TACACS+ config detected.
+          Log: {{ _log_dir }}/{{ inventory_hostname }}_{{ _ts }}.log
 
-- name: "PREFLIGHT | Restore main connection"
-  meta: reset_connection
+    - name: "PREFLIGHT | Close work Telnet session before skipping host"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}"
+        method: DELETE
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: [204, 404]
+      delegate_to: localhost
+      ignore_errors: true
+      when:
+        - work_session_id is defined
+        - connection_mode | default('ssh') == 'telnet'
+
+    - name: "PREFLIGHT | Close broker safety session before skipping host"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/{{ 'telnet-session' if safety_session_protocol | default('ssh') == 'telnet' else 'session' }}/{{ safety_session_id }}"
+        method: DELETE
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: [204, 404]
+      delegate_to: localhost
+      when: safety_session_id is defined
+
+    - name: "PREFLIGHT | Skip host — do not proceed with migration"
+      meta: end_host

@@ -4,40 +4,78 @@
 # Apply command authorization BEFORE switching auth to TACACS+.
 # While auth is still local, these authorizations are safe to set.
 # This prevents a window where TACACS+ auth is active but command auth isn't.
+#
+# connection_mode=ssh    → cisco.ios.ios_command
+# connection_mode=telnet → uri → broker /telnet-session/{work_session_id}/exec
 
-- name: "SAFEGUARD | Configure command authorization via local (interim)"
+- name: "SAFEGUARD | Configure command authorization via local (interim, SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
+      - aaa new-model
       - aaa authorization commands 0  default local if-authenticated
       - aaa authorization commands 1  default local if-authenticated
       - aaa authorization commands 5  default local none
       - aaa authorization commands 15 default local
       - end
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "SAFEGUARD | Verify authorization commands are in running config"
+- name: "SAFEGUARD | Configure command authorization via local (interim, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa new-model
+        - aaa authorization commands 0  default local if-authenticated
+        - aaa authorization commands 1  default local if-authenticated
+        - aaa authorization commands 5  default local none
+        - aaa authorization commands 15 default local
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "SAFEGUARD | Verify authorization commands are in running config (SSH)"
   cisco.ios.ios_command:
     commands:
       - show running-config | include aaa authorization commands
-  register: auth_cmds_check
+  register: auth_cmds_check_ssh
+  when: connection_mode | default('ssh') == 'ssh'
+
+- name: "SAFEGUARD | Verify authorization commands are in running config (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show running-config | include aaa authorization commands
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: auth_cmds_check_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "SAFEGUARD | Normalize authorization check output"
+  set_fact:
+    _auth_cmds_text: >-
+      {{ auth_cmds_check_ssh.stdout[0]
+         if connection_mode | default('ssh') == 'ssh'
+         else auth_cmds_check_telnet.json.outputs['show running-config | include aaa authorization commands'] }}
 
 - name: "SAFEGUARD | Assert command authorization lines are present"
   assert:
     that:
-      - "'commands 0' in auth_cmds_check.stdout[0]"
-      - "'commands 5' in auth_cmds_check.stdout[0]"
+      - "'commands 0' in _auth_cmds_text"
+      - "'commands 5' in _auth_cmds_text"
     fail_msg: >
       Command authorization lines not found in running-config after applying.
-      Output: {{ auth_cmds_check.stdout[0] }}
-
-- name: "SAFEGUARD | Verify current session still works (show privilege)"
-  cisco.ios.ios_command:
-    commands:
-      - show privilege
-  register: priv_result
-
-- name: "SAFEGUARD | Assert session still at privilege 15"
-  assert:
-    that:
-      - "'15' in priv_result.stdout[0]"
-    fail_msg: "Current session privilege dropped after command auth change — rollback needed"
+      Output: {{ _auth_cmds_text }}

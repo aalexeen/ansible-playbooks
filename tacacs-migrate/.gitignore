@@ -7,3 +7,6 @@ vault_pass
 
 # Ansible runtime files
 *.retry
+
+# Migration logs
+logs/

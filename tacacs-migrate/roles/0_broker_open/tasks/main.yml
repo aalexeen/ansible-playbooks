@@ -1,0 +1,188 @@
+---
+# 0_broker_open — open ssh-broker safety session before migration starts
+#
+# Tries SSH first (/session). Falls back to Telnet (/telnet-session) if SSH
+# fails (device may only have Telnet access). Aborts host if both fail.
+#
+# SSH path  → sets: safety_session_id, safety_session_protocol=ssh
+#             connection_mode=ssh — roles 1-5 use cisco.ios.ios_command
+#
+# Telnet path → sets: safety_session_id, safety_session_protocol=telnet
+#                     work_session_id   (second telnet session for migration commands)
+#                     connection_mode=telnet — roles 1-5 use uri → broker
+#
+# Required vars (vault.yml):
+#   broker_url    — http://127.0.0.1:8765
+#   broker_token  — API token
+#   local_user    — local admin username on the device
+#   local_pass    — local admin password
+#
+# Optional vars (group_vars or -e):
+#   local_enable           — enable password for Telnet sessions (default: '')
+#   broker_session_timeout — idle timeout in seconds for this session (default: 600)
+
+- name: "BROKER | Try SSH safety session via ssh-broker"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/session"
+    method: POST
+    body_format: json
+    body:
+      host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+      username: "{{ local_user }}"
+      password: "{{ local_pass }}"
+      device_type: "cisco_ios"
+      session_timeout: "{{ broker_session_timeout | default(600) }}"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 201
+    timeout: 30
+  register: broker_open_ssh
+  delegate_to: localhost
+  failed_when: false
+
+- name: "BROKER | Try Telnet safety session via ssh-broker (SSH failed)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session"
+    method: POST
+    body_format: json
+    body:
+      host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+      username: "{{ local_user }}"
+      password: "{{ local_pass }}"
+      enable_password: "{{ local_enable | default('') }}"
+      session_timeout: "{{ broker_session_timeout | default(600) }}"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 201
+    timeout: 30
+  register: broker_open_telnet
+  delegate_to: localhost
+  failed_when: false
+  when: >
+    broker_open_ssh.status | default(0) != 201
+    or broker_open_ssh.json.session_id | default('') == ''
+
+- name: "BROKER | Skip host if both SSH and Telnet sessions failed"
+  block:
+    - name: "BROKER | Log broker failure"
+      ansible.builtin.copy:
+        content: |
+          ============================================================
+          HOST:      {{ inventory_hostname }}
+          STATUS:    SKIPPED — broker session failed (SSH + Telnet)
+          TIMESTAMP: {{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}
+          ------------------------------------------------------------
+          SSH    HTTP {{ broker_open_ssh.status | default('N/A') }}: {{ broker_open_ssh.msg | default(broker_open_ssh.json | default('no detail') | string) }}
+          Telnet HTTP {{ broker_open_telnet.status | default('N/A') }}: {{ broker_open_telnet.msg | default(broker_open_telnet.json | default('no detail') | string) }}
+          Migration aborted for this host to avoid changes without a safety session.
+          ============================================================
+        dest: "{{ log_dir | default('../logs') }}/{{ inventory_hostname }}_broker_failed.log"
+        mode: "0640"
+      delegate_to: localhost
+      ignore_errors: true
+
+    - name: "BROKER | End this host (skip remaining tasks)"
+      ansible.builtin.meta: end_host
+
+  when: >
+    (broker_open_ssh.status | default(0) != 201
+     or broker_open_ssh.json.session_id | default('') == '')
+    and
+    (broker_open_telnet is skipped
+     or broker_open_telnet.status | default(0) != 201
+     or broker_open_telnet.json.session_id | default('') == '')
+
+- name: "BROKER | Save safety session facts (SSH)"
+  ansible.builtin.set_fact:
+    safety_session_id: "{{ broker_open_ssh.json.session_id }}"
+    safety_session_protocol: "ssh"
+    connection_mode: "ssh"
+  when: >
+    broker_open_ssh.status | default(0) == 201
+    and broker_open_ssh.json.session_id | default('') != ''
+
+# Telnet path: safety session opened above is kept as rollback-only channel.
+# A second independent session is opened for migration commands (work_session).
+
+- name: "BROKER | Open work Telnet session for migration commands (Telnet fallback)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session"
+    method: POST
+    body_format: json
+    body:
+      host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+      username: "{{ local_user }}"
+      password: "{{ local_pass }}"
+      enable_password: "{{ local_enable | default('') }}"
+      session_timeout: "{{ broker_session_timeout | default(600) }}"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 201
+    timeout: 30
+  register: broker_open_work
+  delegate_to: localhost
+  failed_when: false
+  when: >
+    (broker_open_ssh.status | default(0) != 201
+     or broker_open_ssh.json.session_id | default('') == '')
+    and not broker_open_telnet is skipped
+    and broker_open_telnet.status | default(0) == 201
+    and broker_open_telnet.json.session_id | default('') != ''
+
+- name: "BROKER | Skip host if work Telnet session could not be opened"
+  block:
+    - name: "BROKER | Log work session failure"
+      ansible.builtin.copy:
+        content: |
+          ============================================================
+          HOST:      {{ inventory_hostname }}
+          STATUS:    SKIPPED — work telnet session failed
+          TIMESTAMP: {{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}
+          ------------------------------------------------------------
+          Safety session opened OK ({{ broker_open_telnet.json.session_id }})
+          but second (work) telnet session failed: HTTP {{ broker_open_work.status | default('N/A') }}
+          Error: {{ broker_open_work.msg | default(broker_open_work.json | default('no detail') | string) }}
+          ============================================================
+        dest: "{{ log_dir | default('../logs') }}/{{ inventory_hostname }}_broker_failed.log"
+        mode: "0640"
+      delegate_to: localhost
+      ignore_errors: true
+
+    - name: "BROKER | Close safety Telnet session before skipping"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ broker_open_telnet.json.session_id }}"
+        method: DELETE
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: [204, 404]
+      delegate_to: localhost
+      ignore_errors: true
+
+    - name: "BROKER | End this host (skip remaining tasks)"
+      ansible.builtin.meta: end_host
+
+  when: >
+    (broker_open_ssh.status | default(0) != 201
+     or broker_open_ssh.json.session_id | default('') == '')
+    and not broker_open_telnet is skipped
+    and broker_open_telnet.status | default(0) == 201
+    and broker_open_telnet.json.session_id | default('') != ''
+    and (broker_open_work is skipped
+         or broker_open_work.status | default(0) != 201
+         or broker_open_work.json.session_id | default('') == '')
+
+- name: "BROKER | Save safety session facts (Telnet fallback)"
+  ansible.builtin.set_fact:
+    safety_session_id: "{{ broker_open_telnet.json.session_id }}"
+    safety_session_protocol: "telnet"
+    work_session_id: "{{ broker_open_work.json.session_id }}"
+    connection_mode: "telnet"
+  when: >
+    (broker_open_ssh.status | default(0) != 201
+     or broker_open_ssh.json.session_id | default('') == '')
+    and not broker_open_telnet is skipped
+    and broker_open_telnet.status | default(0) == 201
+    and broker_open_telnet.json.session_id | default('') != ''
+    and not broker_open_work is skipped
+    and broker_open_work.status | default(0) == 201
+    and broker_open_work.json.session_id | default('') != ''

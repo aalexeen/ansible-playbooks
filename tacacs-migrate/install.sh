@@ -173,6 +173,24 @@ check_dependencies() {
         fi
     fi
 
+    # ssh-broker check — warning only, not a hard requirement
+    local broker_ok=false
+    if [[ -f "/opt/ssh-broker/.installed" ]]; then
+        ok "ssh-broker: installed at /opt/ssh-broker"
+        broker_ok=true
+    elif command -v curl &>/dev/null; then
+        local _br_url="${BROKER_URL:-http://127.0.0.1:8765}"
+        if curl -sf --max-time 2 "${_br_url}/health" &>/dev/null; then
+            ok "ssh-broker: running at ${_br_url}"
+            broker_ok=true
+        fi
+    fi
+    if [[ "$broker_ok" == false ]]; then
+        warn "ssh-broker not detected — safety session rollback will not be available."
+        warn "Install ssh-broker before running migration, or configure broker settings later:"
+        warn "  $0 configure-broker"
+    fi
+
     [[ "$all_ok" == true ]]
 }
 
@@ -413,6 +431,38 @@ configure_test_user() {
 }
 
 # =============================================================
+# SSH-BROKER CONFIGURATION
+# =============================================================
+
+configure_broker() {
+    header "Configure ssh-broker safety session"
+    info "ssh-broker provides a persistent SSH safety session for rollback."
+    info "It must be running on this controller before migration starts."
+    echo
+
+    local default_url="${BROKER_URL:-http://127.0.0.1:8765}"
+    prompt BROKER_URL   "ssh-broker URL"       "$default_url"
+    prompt_secret BROKER_TOKEN "ssh-broker API token"
+
+    if [[ -z "${BROKER_TOKEN:-}" ]]; then
+        die "Aborted: broker API token is required and cannot be empty."
+    fi
+
+    # Verify broker is reachable
+    echo
+    if command -v curl &>/dev/null; then
+        if curl -sf --max-time 3 "${BROKER_URL}/health" &>/dev/null; then
+            ok "ssh-broker is reachable at ${BROKER_URL}"
+        else
+            warn "Could not reach ssh-broker at ${BROKER_URL}"
+            warn "Make sure ssh-broker is running before executing the migration."
+        fi
+    fi
+
+    ok "Broker settings configured."
+}
+
+# =============================================================
 # VAULT CREATE / REKEY
 # =============================================================
 
@@ -434,6 +484,10 @@ create_and_encrypt_vault() {
 # DO NOT commit this file to git
 # To edit: ansible-vault edit ${VAULT_FILE_REL}
 # To view: ansible-vault view ${VAULT_FILE_REL}
+
+# ssh-broker safety session
+broker_url:   "${BROKER_URL:-http://127.0.0.1:8765}"
+broker_token: "${BROKER_TOKEN:-}"
 
 # Local switch credentials (used by migration + rollback safety session)
 local_user:          "${LOCAL_USER}"
@@ -629,6 +683,7 @@ configure_vault() {
         if ! confirm "Continue?"; then info "Cancelled."; return; fi
     fi
 
+    configure_broker
     configure_servers
     configure_switch_credentials
     configure_test_user
@@ -649,6 +704,64 @@ configure_vault() {
 do_configure() {
     configure_hosts
     configure_vault
+}
+
+do_configure_broker() {
+    header "Configure ssh-broker in vault"
+
+    local vf; vf="$(vault_file)"
+    [[ -f "$vf" ]] || die "vault.yml not found. Run 'configure-vault' first."
+
+    load_vars
+
+    # Decrypt vault to a temp file
+    local tmp; tmp="$(mktemp)"
+    chmod 600 "$tmp"
+    _VAULT_GUARD="$tmp"
+
+    local va=()
+    mapfile -t va < <(vault_args)
+
+    if [[ "${va[1]:-}" == "default@/dev/stdin" ]]; then
+        vault_stdin_pipe | ansible-vault decrypt "$vf" "${va[@]}" --output "$tmp" \
+            || die "Failed to decrypt vault.yml"
+    else
+        ansible-vault decrypt "$vf" "${va[@]}" --output "$tmp" \
+            || die "Failed to decrypt vault.yml"
+    fi
+
+    configure_broker
+
+    # Update broker_url and broker_token lines in the decrypted file.
+    # If lines exist — replace them; if not — append broker section.
+    if grep -q "^broker_url:" "$tmp" 2>/dev/null; then
+        sed -i "s|^broker_url:.*|broker_url:   \"${BROKER_URL}\"|" "$tmp"
+        sed -i "s|^broker_token:.*|broker_token: \"${BROKER_TOKEN}\"|" "$tmp"
+    else
+        printf '\n# ssh-broker safety session\nbroker_url:   "%s"\nbroker_token: "%s"\n' \
+            "${BROKER_URL}" "${BROKER_TOKEN}" >> "$tmp"
+    fi
+
+    # Re-encrypt
+    if [[ -n "${VAULT_PASSWORD_FILE:-}" && -f "${VAULT_PASSWORD_FILE}" ]]; then
+        ansible-vault encrypt "$tmp" \
+            --vault-id "default@${VAULT_PASSWORD_FILE}" \
+            --encrypt-vault-id default \
+            --output "$vf"
+    elif [[ -n "${VAULT_RAW_PASSWORD:-}" ]]; then
+        printf '%s' "${VAULT_RAW_PASSWORD}" \
+            | ansible-vault encrypt "$tmp" \
+                --vault-id "default@/dev/stdin" \
+                --encrypt-vault-id default \
+                --output "$vf"
+    else
+        ansible-vault encrypt "$tmp" --encrypt-vault-id default --output "$vf"
+    fi
+
+    rm -f "$tmp"
+    _VAULT_GUARD=""
+    ok "Broker settings saved and vault re-encrypted."
+    info "Verify with: ansible-vault view ${VAULT_FILE_REL}"
 }
 
 # =============================================================
@@ -719,6 +832,20 @@ do_run() {
 
     local vf; vf="$(vault_file)"
     [[ -f "$vf" ]] || die "vault.yml not found. Run: $0 configure-vault"
+
+    # ssh-broker pre-flight check
+    local _broker_url="${BROKER_URL:-http://127.0.0.1:8765}"
+    if command -v curl &>/dev/null; then
+        if curl -sf --max-time 2 "${_broker_url}/health" &>/dev/null; then
+            ok "ssh-broker: reachable at ${_broker_url}"
+        else
+            warn "ssh-broker is NOT reachable at ${_broker_url}"
+            warn "Migration will abort per-host at phase 0 (broker open)."
+            warn "Start ssh-broker or configure broker settings: $0 configure-broker"
+            echo
+            if ! confirm "Continue anyway?"; then info "Aborted."; return; fi
+        fi
+    fi
 
     local va=()
     mapfile -t va < <(vault_args)
@@ -842,22 +969,24 @@ menu_installed() {
         echo "  2) Configure everything (hosts + vault)"
         echo "  3) Configure switches (inventory) only"
         echo "  4) Configure TACACS+ secrets only (recreate vault)"
-        echo "  5) Change vault password"
-        echo "  6) Status"
-        echo "  7) Uninstall"
-        echo "  8) Exit"
+        echo "  5) Configure ssh-broker settings (update vault)"
+        echo "  6) Change vault password"
+        echo "  7) Status"
+        echo "  8) Uninstall"
+        echo "  9) Exit"
         echo
-        echo -ne "Choice [1-8]: "
+        echo -ne "Choice [1-9]: "
         read -r choice || _on_interrupt
         case "$choice" in
             1) do_run ;;
             2) do_configure ;;
             3) configure_hosts ;;
             4) configure_vault ;;
-            5) do_configure_vault_password ;;
-            6) show_status ;;
-            7) do_uninstall ;;
-            8) exit 0 ;;
+            5) do_configure_broker ;;
+            6) do_configure_vault_password ;;
+            7) show_status ;;
+            8) do_uninstall ;;
+            9) exit 0 ;;
             *) warn "Invalid choice." ;;
         esac
     done
@@ -887,6 +1016,11 @@ case "$ACTION" in
     configure-vault)
         [[ "$MODE" == "installed" ]] || die "'configure-vault' requires installed mode."
         configure_vault
+        ;;
+    configure-broker)
+        [[ "$MODE" == "installed" ]] || die "'configure-broker' requires installed mode."
+        load_vars
+        do_configure_broker
         ;;
     configure-vault-password)
         [[ "$MODE" == "installed" ]] || die "'configure-vault-password' requires installed mode."
@@ -919,6 +1053,7 @@ case "$ACTION" in
             echo "  configure                  Configure hosts + secrets (full setup)"
             echo "  configure-hosts            Configure switch inventory only"
             echo "  configure-vault            Configure TACACS+ secrets (recreate vault)"
+            echo "  configure-broker           Configure ssh-broker URL and token (update vault)"
             echo "  configure-vault-password   Change vault encryption password"
             echo "  run [--limit HOST] [args]  Run migration playbook"
             echo "  status                     Show current configuration"

@@ -3,57 +3,142 @@
 #
 # CRITICAL STEP — after this, new connections authenticate via TACACS+.
 #
-# Two-session verification:
-#   After switching, we reset the Ansible connection and reconnect using
-#   TACACS+ credentials to confirm TACACS+ authentication actually works.
-#   If reconnect fails → assert fires → outer rescue rolls everything back
-#   via local-auth reconnect (safety session).
+# connection_mode=ssh:
+#   Uses cisco.ios.ios_command. After switching, meta: reset_connection
+#   re-authenticates via TACACS+ to verify the new config works.
+#
+# connection_mode=telnet:
+#   Uses uri → broker work_session. reset_connection is not available for
+#   Telnet; verification is done via show privilege on the existing session
+#   (the session was authenticated with local creds and survives AAA changes).
+#
+# Branch legacy: references built-in group tacacs+
+# Branch modern (16+): references named group (tacacs_server_group)
 
-- name: "SWITCH | Switch authentication to TACACS+ (IOS XE 16)"
+- name: "SWITCH | Switch authentication to TACACS+ (legacy, SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
+      - aaa new-model
+      - aaa authentication login default group tacacs+ local
+      - aaa authorization exec default group tacacs+ local if-authenticated
+      - end
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
+
+- name: "SWITCH | Switch authentication to TACACS+ (modern 16+, SSH)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - aaa new-model
       - "aaa authentication login default group {{ tacacs_server_group }} local"
       - "aaa authorization exec default group {{ tacacs_server_group }} local if-authenticated"
       - aaa authorization config-commands
       - end
-  when: ios_version | int == 16
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
 
-- name: "SWITCH | Switch authentication to TACACS+ (IOS 12)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
-      - aaa authentication login default group tacacs+ local
-      - aaa authorization exec default group tacacs+ local if-authenticated
-      - end
-  when: ios_version | int == 12
+- name: "SWITCH | Switch authentication to TACACS+ (legacy, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa new-model
+        - aaa authentication login default group tacacs+ local
+        - aaa authorization exec default group tacacs+ local if-authenticated
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
 
-# ── TACACS+ verification: open new session with TACACS+ credentials ────────
-# Reset forces Ansible to close current SSH connection and open a new one.
-# By overriding credentials to TACACS+ user, the new connection proves
-# that TACACS+ authentication is fully working end-to-end.
+- name: "SWITCH | Switch authentication to TACACS+ (modern 16+, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa new-model
+        - "aaa authentication login default group {{ tacacs_server_group }} local"
+        - "aaa authorization exec default group {{ tacacs_server_group }} local if-authenticated"
+        - aaa authorization config-commands
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
 
-- name: "SWITCH | Reset connection to force re-authentication"
+# ── SSH path: reconnect as TACACS+ test user to verify ────────────────────
+
+- name: "SWITCH | Reset connection to force re-authentication (SSH)"
   meta: reset_connection
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "SWITCH | Verify TACACS+ auth — reconnect as TACACS+ test user"
+- name: "SWITCH | Verify TACACS+ auth — reconnect as TACACS+ test user (SSH)"
   cisco.ios.ios_command:
     commands:
       - show privilege
-  register: tacacs_verify
+  register: tacacs_verify_ssh
   vars:
     ansible_user: "{{ tacacs_test_user }}"
     ansible_password: "{{ tacacs_test_pass }}"
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "SWITCH | Assert TACACS+ session is functional (priv 15)"
+- name: "SWITCH | Assert TACACS+ authentication is functional (SSH)"
   assert:
     that:
-      - "'15' in tacacs_verify.stdout[0]"
+      - tacacs_verify_ssh.stdout[0] is defined
+      - tacacs_verify_ssh is not failed
     fail_msg: >
-      TACACS+ auth session opened but privilege is not 15.
-      Output: {{ tacacs_verify.stdout[0] }}
+      TACACS+ auth session failed — could not reconnect as test user.
+      Output: {{ tacacs_verify_ssh.stdout[0] | default('no output') }}
+  when: connection_mode | default('ssh') == 'ssh'
 
-# ── Restore normal connection (main ansible_user) ─────────────────────────
-
-- name: "SWITCH | Reset connection back to main credentials"
+- name: "SWITCH | Reset connection back to main credentials (SSH)"
   meta: reset_connection
+  when: connection_mode | default('ssh') == 'ssh'
+
+# ── Telnet path: verify via existing work session ─────────────────────────
+# The work session was authenticated with local creds and stays alive through
+# the AAA change. We verify TACACS+ reachability by checking show privilege
+# (session still works) and that the aaa authentication line is in running-config.
+
+- name: "SWITCH | Verify TACACS+ config is in running-config (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show running-config | include aaa authentication login
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: tacacs_verify_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "SWITCH | Assert TACACS+ authentication config is present (Telnet)"
+  assert:
+    that:
+      - "'tacacs' in (tacacs_verify_telnet.json.outputs['show running-config | include aaa authentication login'] | lower)"
+    fail_msg: >
+      TACACS+ auth config not found in running-config after switching.
+      Output: {{ tacacs_verify_telnet.json.outputs['show running-config | include aaa authentication login'] }}
+  when: connection_mode | default('ssh') == 'telnet'

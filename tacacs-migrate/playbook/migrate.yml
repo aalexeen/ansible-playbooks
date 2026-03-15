@@ -5,16 +5,26 @@
 # Usage:
 #   ansible-playbook -i ../inventory/hosts migrate.yml
 #   Single host:
-#   ansible-playbook -i ../inventory/hosts migrate.yml -l AA01ASWI
+#   ansible-playbook -i ../inventory/hosts migrate.yml -l SW-01
 #
-# Two-session safety model:
-#   WORK SESSION  — Ansible normal network_cli connection (current user)
-#   SAFETY SESSION — block/rescue overrides ansible_user/password to local
-#                    credentials, forcing a new local-auth connection for
-#                    rollback if any step fails.
+# Safety session model:
+#   Before any changes, 0_broker_open opens a persistent SSH session to the
+#   device via ssh-broker using local credentials. This session is independent
+#   of Ansible's network_cli connection and survives AAA changes.
+#   If any migration step fails, the rescue block sends rollback commands
+#   directly through the broker session and then closes it.
+#
+# Error handling model:
+#   - any_errors_fatal: false — a failure on one host does NOT stop other hosts
+#   - ignore_unreachable: true — unreachable hosts are skipped, not fatal
+#   - block/rescue/always — rescue rolls back via broker, always writes the log
+#   - Log file per host: ../logs/<inventory_hostname>_<timestamp>.log
+#     written on controller regardless of success or failure
 #
 # Override vars at runtime:
-#   -e serial=5          run on 5 switches in parallel (default: 1)
+#   -e serial=5                    run on 5 switches in parallel (default: 1)
+#   -e log_dir=../logs             override log directory (default: ../logs)
+#   -e broker_session_timeout=900  broker idle timeout in seconds (default: 600)
 # =============================================================
 
 - name: Migrate switches to TACACS+ AAA
@@ -22,21 +32,138 @@
   gather_facts: false
   connection: network_cli
   serial: "{{ serial | default(1) }}"
+  any_errors_fatal: false
+  ignore_unreachable: true
 
   vars:
     ansible_network_os: cisco.ios.ios
     ansible_become: true
     ansible_become_method: enable
     ansible_become_pass: "{{ local_enable | default('') }}"
+    _log_dir: "{{ log_dir | default('../logs') }}"
+    _ts: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
   vars_files:
     - vars/vault.yml
 
   tasks:
+
+    # ── Ensure log directory exists (once per batch, runs on controller) ──
+
+    - name: "MIGRATE | Ensure log directory exists"
+      file:
+        path: "{{ _log_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    # ── Catch unreachable hosts before the main block ─────────────────────
+    # Probe via ssh-broker TCP check (SSH port 22 first, then Telnet port 23).
+    # This avoids a network_cli SSH connection attempt that would always fail
+    # for Telnet-only devices and produce a misleading UNREACHABLE log entry.
+
+    - name: "MIGRATE | Pre-check — probe SSH port via broker health"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/session"
+        method: POST
+        body_format: json
+        body:
+          host: "{{ ansible_host | default(inventory_hostname) }}"
+          username: "{{ local_user }}"
+          password: "{{ local_pass }}"
+          device_type: "cisco_ios"
+          timeout: 10
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 201
+        timeout: 15
+      register: _precheck_ssh
+      delegate_to: localhost
+      failed_when: false
+
+    - name: "MIGRATE | Pre-check — probe Telnet port via broker (SSH unreachable)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session"
+        method: POST
+        body_format: json
+        body:
+          host: "{{ ansible_host | default(inventory_hostname) }}"
+          username: "{{ local_user }}"
+          password: "{{ local_pass }}"
+          enable_password: "{{ local_enable | default('') }}"
+          timeout: 10
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 201
+        timeout: 15
+      register: _precheck_telnet
+      delegate_to: localhost
+      failed_when: false
+      when: _precheck_ssh.status | default(0) != 201
+
+    - name: "MIGRATE | Pre-check — close SSH probe session"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/session/{{ _precheck_ssh.json.session_id }}"
+        method: DELETE
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: [204, 404]
+      delegate_to: localhost
+      failed_when: false
+      when: _precheck_ssh.status | default(0) == 201
+
+    - name: "MIGRATE | Pre-check — close Telnet probe session"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ _precheck_telnet.json.session_id }}"
+        method: DELETE
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: [204, 404]
+      delegate_to: localhost
+      failed_when: false
+      when:
+        - _precheck_ssh.status | default(0) != 201
+        - not _precheck_telnet is skipped
+        - _precheck_telnet.status | default(0) == 201
+
+    - name: "MIGRATE | Log unreachable host and skip"
+      block:
+        - name: "MIGRATE | Write unreachable log entry"
+          copy:
+            content: |
+              ============================================================
+              HOST:      {{ inventory_hostname }}
+              STATUS:    UNREACHABLE
+              TIMESTAMP: {{ _ts }}
+              ------------------------------------------------------------
+              The host did not respond on SSH (port 22) or Telnet (port 23).
+              ansible_host: {{ ansible_host | default('not set') }}
+              SSH error:    {{ _precheck_ssh.msg | default('HTTP ' + (_precheck_ssh.status | default('N/A') | string)) }}
+              Telnet error: {{ _precheck_telnet.msg | default('HTTP ' + (_precheck_telnet.status | default('N/A') | string)) if not _precheck_telnet is skipped else 'not attempted' }}
+              ============================================================
+            dest: "{{ _log_dir }}/{{ inventory_hostname }}_{{ _ts }}.log"
+            mode: "0640"
+          delegate_to: localhost
+
+        - name: "MIGRATE | Mark host as failed (unreachable)"
+          fail:
+            msg: "Host {{ inventory_hostname }} is unreachable on SSH and Telnet — skipping migration."
+          ignore_errors: true
+      when: >
+        _precheck_ssh.status | default(0) != 201
+        and (_precheck_telnet is skipped or _precheck_telnet.status | default(0) != 201)
+
+    # ── Main migration block ───────────────────────────────────────────────
+
     - name: "MIGRATE | Run migration with rollback protection"
       block:
 
-        - name: "MIGRATE | Phase 1 — preflight: validate variables and local user safety"
+        - name: "MIGRATE | Phase 0 — open ssh-broker safety session"
+          import_role:
+            name: 0_broker_open
+
+        - name: "MIGRATE | Phase 1 — preflight: validate variables and IOS version"
           import_role:
             name: 1_preflight
 
@@ -56,7 +183,177 @@
           import_role:
             name: 5_finalize
 
+        - name: "MIGRATE | Record migration success"
+          set_fact:
+            _migration_status: "SUCCESS"
+            _migration_detail: "All phases completed. Config saved to NVRAM."
+
       rescue:
-        - name: "MIGRATE | Phase 6 — rollback: revert to local authentication"
-          import_role:
-            name: 6_rollback
+
+        - name: "MIGRATE | Record failure details before rollback"
+          set_fact:
+            _migration_status: "FAILED — ROLLBACK APPLIED"
+            _migration_detail: >-
+              Failed task : {{ ansible_failed_task.name | default('unknown') }}
+              Error       : {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+
+        # ── Rollback via ssh-broker safety session ─────────────────────────
+        # Commands are sent through the broker session opened before migration.
+        # This session uses local credentials and is independent of any AAA
+        # changes that may have been applied to the device.
+
+        - name: "MIGRATE | Rollback — restore local AAA (legacy, shared key)"
+          # Legacy IOS <=15: tacacs-server host + tacacs-server key (separate global key command)
+          # Also used when modern syntax was rejected and we fell back to legacy_old_syntax.
+          ansible.builtin.uri:
+            url: "{{ broker_url }}/{{ 'telnet-session' if safety_session_protocol | default('ssh') == 'telnet' else 'session' }}/{{ safety_session_id }}/exec"
+            method: POST
+            body_format: json
+            body:
+              commands: >-
+                {{
+                  ['configure terminal',
+                   'no aaa authorization commands 0  default',
+                   'no aaa authorization commands 1  default',
+                   'no aaa authorization commands 5  default',
+                   'no aaa authorization commands 15 default',
+                   'aaa authentication login default local',
+                   'aaa authorization exec default local',
+                   'no tacacs-server host ' + tacacs_server_primary]
+                  + (['no tacacs-server host ' + tacacs_server_secondary]
+                     if tacacs_server_secondary | default('') != '' else [])
+                  + ['no tacacs-server key',
+                     'end', 'write memory']
+                }}
+            headers:
+              X-API-Token: "{{ broker_token }}"
+            status_code: 200
+            timeout: 60
+          delegate_to: localhost
+          ignore_errors: true
+          when:
+            - safety_session_id is defined
+            - ios_branch is defined
+            - ios_branch == 'legacy'
+            - legacy_old_syntax | default(false) | bool
+
+        - name: "MIGRATE | Rollback — restore local AAA (legacy, per-host key)"
+          # Legacy IOS <=15 with per-host key (tacacs-server host X key Y): no global key needed.
+          ansible.builtin.uri:
+            url: "{{ broker_url }}/{{ 'telnet-session' if safety_session_protocol | default('ssh') == 'telnet' else 'session' }}/{{ safety_session_id }}/exec"
+            method: POST
+            body_format: json
+            body:
+              commands: >-
+                {{
+                  ['configure terminal',
+                   'no aaa authorization commands 0  default',
+                   'no aaa authorization commands 1  default',
+                   'no aaa authorization commands 5  default',
+                   'no aaa authorization commands 15 default',
+                   'aaa authentication login default local',
+                   'aaa authorization exec default local',
+                   'no tacacs-server host ' + tacacs_server_primary]
+                  + (['no tacacs-server host ' + tacacs_server_secondary]
+                     if tacacs_server_secondary | default('') != '' else [])
+                  + ['end', 'write memory']
+                }}
+            headers:
+              X-API-Token: "{{ broker_token }}"
+            status_code: 200
+            timeout: 60
+          delegate_to: localhost
+          ignore_errors: true
+          when:
+            - safety_session_id is defined
+            - ios_branch is defined
+            - ios_branch == 'legacy'
+            - not (legacy_old_syntax | default(false) | bool)
+
+        - name: "MIGRATE | Rollback — restore local AAA (modern 16+)"
+          ansible.builtin.uri:
+            url: "{{ broker_url }}/{{ 'telnet-session' if safety_session_protocol | default('ssh') == 'telnet' else 'session' }}/{{ safety_session_id }}/exec"
+            method: POST
+            body_format: json
+            body:
+              commands: >-
+                {{
+                  ['configure terminal',
+                   'no aaa authorization config-commands',
+                   'no aaa authorization commands 0  default',
+                   'no aaa authorization commands 1  default',
+                   'no aaa authorization commands 5  default',
+                   'no aaa authorization commands 15 default',
+                   'aaa authentication login default local',
+                   'aaa authorization exec default local',
+                   'no aaa group server tacacs+ ' + tacacs_server_group,
+                   'no tacacs server TACACS-PRIMARY']
+                  + (['no tacacs server TACACS-SECONDARY']
+                     if tacacs_server_secondary | default('') != '' else [])
+                  + ['end', 'write memory']
+                }}
+            headers:
+              X-API-Token: "{{ broker_token }}"
+            status_code: 200
+            timeout: 60
+          delegate_to: localhost
+          ignore_errors: true
+          when:
+            - safety_session_id is defined
+            - ios_branch is defined
+            - ios_branch == 'modern'
+
+      # ── Always: close broker session, write log ──────────────────────────
+
+      always:
+
+        - name: "MIGRATE | Close broker work session (Telnet path)"
+          ansible.builtin.uri:
+            url: "{{ broker_url }}/telnet-session/{{ work_session_id }}"
+            method: DELETE
+            headers:
+              X-API-Token: "{{ broker_token }}"
+            status_code: [204, 404]
+          delegate_to: localhost
+          ignore_errors: true
+          when:
+            - work_session_id is defined
+            - connection_mode | default('ssh') == 'telnet'
+
+        - name: "MIGRATE | Close broker safety session"
+          ansible.builtin.uri:
+            url: "{{ broker_url }}/{{ 'telnet-session' if safety_session_protocol | default('ssh') == 'telnet' else 'session' }}/{{ safety_session_id }}"
+            method: DELETE
+            headers:
+              X-API-Token: "{{ broker_token }}"
+            status_code: [204, 404]
+          delegate_to: localhost
+          ignore_errors: true
+          when: safety_session_id is defined
+
+        - name: "MIGRATE | Write migration log to controller"
+          copy:
+            content: |
+              ============================================================
+              HOST:      {{ inventory_hostname }}
+              STATUS:    {{ _migration_status | default('UNKNOWN — play aborted before result was set') }}
+              TIMESTAMP: {{ _ts }}
+              IOS:       {{ ios_major | default('?') }}.{{ ios_minor | default('?') }} (branch: {{ ios_branch | default('?') }})
+              SERVERS:   primary={{ tacacs_server_primary | default('?') }}  secondary={{ tacacs_server_secondary | default('not configured') }}
+              ------------------------------------------------------------
+              {{ _migration_detail | default('No detail recorded.') }}
+              ============================================================
+            dest: "{{ _log_dir }}/{{ inventory_hostname }}_{{ _ts }}.log"
+            mode: "0640"
+          delegate_to: localhost
+          ignore_errors: true
+
+        - name: "MIGRATE | Print log path"
+          debug:
+            msg: "Log written: {{ _log_dir }}/{{ inventory_hostname }}_{{ _ts }}.log  |  Status: {{ _migration_status | default('UNKNOWN') }}"
+
+        - name: "MIGRATE | Fail the host if migration did not succeed"
+          fail:
+            msg: "Migration {{ _migration_status }} on {{ inventory_hostname }}"
+          when: _migration_status | default('UNKNOWN') != 'SUCCESS'
+          ignore_errors: true

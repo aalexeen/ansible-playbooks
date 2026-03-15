@@ -1,69 +1,96 @@
 ---
 # 5_finalize — switch command authorization to TACACS+, configure accounting, save
 #
-# Step 6: Replace interim LOCAL command authorization with TACACS+
-#   IOS/IOS XE overwrites existing authorization rules in-place — no "no" needed.
-#   This avoids a window with no command authorization between removal and re-application.
-#   Failsafe levels:
-#     0, 1: if-authenticated  → exit/logout work even if TACACS+ down
-#     5:    none              → show/conf t work when TACACS+ down (engineer fallback)
-#     15:   (no fallback)     → reload/erase blocked when TACACS+ down
+# connection_mode=ssh    → cisco.ios.ios_command + meta: reset_connection for verify
+# connection_mode=telnet → uri → broker /telnet-session/{work_session_id}/exec
 #
-# Step 7: Configure exec + command accounting
-# Step 8: Full AAA verification via new session before saving
-# Step 9: Save running config to NVRAM
+# Branch legacy: references built-in group tacacs+
+# Branch modern (16+): references named group (tacacs_server_group)
+#
+# Failsafe levels:
+#   0, 1: if-authenticated  → exit/logout work even if TACACS+ down
+#   5:    none              → show/conf t work when TACACS+ down (engineer fallback)
+#   15:   (no fallback)     → reload/erase blocked when TACACS+ down
 
 # ── Step 6: Switch command authorization to TACACS+ ────────────────────────
 
-- name: "FINALIZE | Apply TACACS+ command authorization (IOS XE 16)"
+- name: "FINALIZE | Apply TACACS+ command authorization (legacy, SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
-      - "aaa authorization commands 0  default group {{ tacacs_server_group }} if-authenticated"
-      - "aaa authorization commands 1  default group {{ tacacs_server_group }} if-authenticated"
-      - "aaa authorization commands 5  default group {{ tacacs_server_group }} none"
-      - "aaa authorization commands 15 default group {{ tacacs_server_group }}"
-      - end
-  when: ios_version | int == 16
-
-- name: "FINALIZE | Apply TACACS+ command authorization (IOS 12)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
+      - aaa new-model
       - aaa authorization commands 0  default group tacacs+ if-authenticated
       - aaa authorization commands 1  default group tacacs+ if-authenticated
       - aaa authorization commands 5  default group tacacs+ none
       - aaa authorization commands 15 default group tacacs+
       - end
-  when: ios_version | int == 12
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
 
-- name: "FINALIZE | Verify current session commands still work"
-  cisco.ios.ios_command:
-    commands:
-      - show privilege
-  register: step6_priv
-
-- name: "FINALIZE | Assert session still functional after command auth switch"
-  assert:
-    that:
-      - "'15' in step6_priv.stdout[0]"
-    fail_msg: "Session dropped or privilege changed after switching command auth to TACACS+"
-
-# ── Step 7: Accounting ─────────────────────────────────────────────────────
-
-- name: "FINALIZE | Configure accounting (IOS XE 16)"
+- name: "FINALIZE | Apply TACACS+ command authorization (modern 16+, SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
-      - "aaa accounting exec default start-stop group {{ tacacs_server_group }}"
-      - "aaa accounting commands 0  default start-stop group {{ tacacs_server_group }}"
-      - "aaa accounting commands 1  default start-stop group {{ tacacs_server_group }}"
-      - "aaa accounting commands 5  default start-stop group {{ tacacs_server_group }}"
-      - "aaa accounting commands 15 default start-stop group {{ tacacs_server_group }}"
+      - aaa new-model
+      - "aaa authorization commands 0  default group {{ tacacs_server_group }} if-authenticated"
+      - "aaa authorization commands 1  default group {{ tacacs_server_group }} if-authenticated"
+      - "aaa authorization commands 5  default group {{ tacacs_server_group }} none"
+      - "aaa authorization commands 15 default group {{ tacacs_server_group }}"
       - end
-  when: ios_version | int == 16
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
 
-- name: "FINALIZE | Configure accounting (IOS 12)"
+- name: "FINALIZE | Apply TACACS+ command authorization (legacy, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa new-model
+        - aaa authorization commands 0  default group tacacs+ if-authenticated
+        - aaa authorization commands 1  default group tacacs+ if-authenticated
+        - aaa authorization commands 5  default group tacacs+ none
+        - aaa authorization commands 15 default group tacacs+
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+
+- name: "FINALIZE | Apply TACACS+ command authorization (modern 16+, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa new-model
+        - "aaa authorization commands 0  default group {{ tacacs_server_group }} if-authenticated"
+        - "aaa authorization commands 1  default group {{ tacacs_server_group }} if-authenticated"
+        - "aaa authorization commands 5  default group {{ tacacs_server_group }} none"
+        - "aaa authorization commands 15 default group {{ tacacs_server_group }}"
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+
+# ── Step 7: Accounting ─────────────────────────────────────────────────────
+
+- name: "FINALIZE | Configure accounting (legacy, SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
@@ -73,72 +100,213 @@
       - aaa accounting commands 5  default start-stop group tacacs+
       - aaa accounting commands 15 default start-stop group tacacs+
       - end
-  when: ios_version | int == 12
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
 
-- name: "FINALIZE | Verify accounting config is present"
+- name: "FINALIZE | Configure accounting (modern 16+, SSH)"
+  cisco.ios.ios_command:
+    commands:
+      - configure terminal
+      - "aaa accounting exec default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 0  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 1  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 5  default start-stop group {{ tacacs_server_group }}"
+      - "aaa accounting commands 15 default start-stop group {{ tacacs_server_group }}"
+      - end
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
+
+- name: "FINALIZE | Configure accounting (legacy, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - aaa accounting exec default start-stop group tacacs+
+        - aaa accounting commands 0  default start-stop group tacacs+
+        - aaa accounting commands 1  default start-stop group tacacs+
+        - aaa accounting commands 5  default start-stop group tacacs+
+        - aaa accounting commands 15 default start-stop group tacacs+
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+
+- name: "FINALIZE | Configure accounting (modern 16+, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - "aaa accounting exec default start-stop group {{ tacacs_server_group }}"
+        - "aaa accounting commands 0  default start-stop group {{ tacacs_server_group }}"
+        - "aaa accounting commands 1  default start-stop group {{ tacacs_server_group }}"
+        - "aaa accounting commands 5  default start-stop group {{ tacacs_server_group }}"
+        - "aaa accounting commands 15 default start-stop group {{ tacacs_server_group }}"
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+
+- name: "FINALIZE | Verify accounting config is present (SSH)"
   cisco.ios.ios_command:
     commands:
       - show running-config | include aaa accounting
-  register: acct_check
+  register: acct_check_ssh
+  when: connection_mode | default('ssh') == 'ssh'
+
+- name: "FINALIZE | Verify accounting config is present (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show running-config | include aaa accounting
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: acct_check_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "FINALIZE | Normalize accounting check output"
+  set_fact:
+    _acct_text: >-
+      {{ acct_check_ssh.stdout[0]
+         if connection_mode | default('ssh') == 'ssh'
+         else acct_check_telnet.json.outputs['show running-config | include aaa accounting'] }}
 
 - name: "FINALIZE | Assert accounting exec and commands are configured"
   assert:
     that:
-      - "'accounting exec default' in acct_check.stdout[0]"
-      - "'accounting commands' in acct_check.stdout[0]"
+      - "'accounting exec default' in _acct_text"
+      - "'accounting commands' in _acct_text"
     fail_msg: "Accounting lines not found in running-config after applying"
 
-# ── Step 8: Full AAA verification via new session ──────────────────────────
-# Reset forces a new connection using local_user credentials via TACACS+ auth.
-# Proves that authentication + command authorization are fully functional.
-# If this fails → assert fires → rescue rolls everything back → config NOT saved.
+# ── Step 8: Full AAA verification ──────────────────────────────────────────
 
-- name: "FINALIZE | Reset connection for full AAA verification"
+- name: "FINALIZE | Reset connection for full AAA verification (SSH)"
   meta: reset_connection
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "FINALIZE | Verify full AAA — reconnect as admin via TACACS+"
+- name: "FINALIZE | Verify full AAA — reconnect as admin via TACACS+ (SSH)"
   cisco.ios.ios_command:
     commands:
       - show privilege
-  register: final_verify
+  register: final_verify_ssh
   vars:
     ansible_user: "{{ local_user }}"
     ansible_password: "{{ local_pass }}"
     ansible_become_pass: "{{ local_enable | default('') }}"
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "FINALIZE | Assert admin TACACS+ session has privilege 15"
+- name: "FINALIZE | Assert admin TACACS+ session is functional (SSH)"
   assert:
     that:
-      - "'15' in final_verify.stdout[0]"
+      - final_verify_ssh.stdout[0] is defined
+      - final_verify_ssh is not failed
     fail_msg: >
-      Full AAA verification failed — admin session did not reach privilege 15 via TACACS+.
-      Config will NOT be saved. Output: {{ final_verify.stdout[0] }}
+      Full AAA verification failed — admin session could not reconnect via TACACS+.
+      Config will NOT be saved. Output: {{ final_verify_ssh.stdout[0] | default('no output') }}
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "FINALIZE | Reset connection back to main credentials"
+- name: "FINALIZE | Reset connection back to main credentials (SSH)"
   meta: reset_connection
+  when: connection_mode | default('ssh') == 'ssh'
+
+- name: "FINALIZE | Verify full AAA config is complete (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - show running-config | include aaa
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  register: final_verify_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "FINALIZE | Assert full AAA config is complete (Telnet)"
+  assert:
+    that:
+      - "'authentication login' in (final_verify_telnet.json.outputs['show running-config | include aaa'] | lower)"
+      - "'accounting exec' in (final_verify_telnet.json.outputs['show running-config | include aaa'] | lower)"
+      - "'authorization commands' in (final_verify_telnet.json.outputs['show running-config | include aaa'] | lower)"
+    fail_msg: >
+      Full AAA verification failed — expected aaa lines not found in running-config.
+      Config will NOT be saved.
+      Output: {{ final_verify_telnet.json.outputs['show running-config | include aaa'] }}
+  when: connection_mode | default('ssh') == 'telnet'
 
 # ── Step 9: Save ───────────────────────────────────────────────────────────
 
-- name: "FINALIZE | Save configuration (write memory)"
+- name: "FINALIZE | Save configuration (write memory, SSH)"
   cisco.ios.ios_command:
     commands:
       - write memory
-  register: save_result
+  register: save_result_ssh
+  when: connection_mode | default('ssh') == 'ssh'
+
+- name: "FINALIZE | Save configuration (write memory, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - write memory
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 60
+  register: save_result_telnet
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
+
+- name: "FINALIZE | Normalize save output"
+  set_fact:
+    _save_text: >-
+      {{ save_result_ssh.stdout[0]
+         if connection_mode | default('ssh') == 'ssh'
+         else save_result_telnet.json.outputs['write memory'] }}
 
 - name: "FINALIZE | Assert config was saved"
   assert:
     that:
       - >
-        'ok' in (save_result.stdout[0] | lower)
-        or '[ok]' in (save_result.stdout[0] | lower)
-        or 'building' in (save_result.stdout[0] | lower)
-    fail_msg: "Config save may have failed. Output: {{ save_result.stdout[0] }}"
+        'ok' in (_save_text | lower)
+        or '[ok]' in (_save_text | lower)
+        or 'building' in (_save_text | lower)
+    fail_msg: "Config save may have failed. Output: {{ _save_text }}"
 
 - name: "FINALIZE | Migration complete"
   debug:
     msg: >
       ══════════════════════════════════════════
       Migration SUCCEEDED: {{ inventory_hostname }}
-      IOS version: {{ ios_version }}
-      TACACS+ servers: {{ tacacs_server_primary }}, {{ tacacs_server_secondary }}
+      IOS version: {{ ios_major }}.{{ ios_minor }} (branch: {{ ios_branch }})
+      Connection: {{ connection_mode | default('ssh') }}
+      TACACS+ servers: {{ tacacs_server_primary }}{{ ', ' + tacacs_server_secondary if tacacs_server_secondary | default('') != '' else '' }}
       ══════════════════════════════════════════

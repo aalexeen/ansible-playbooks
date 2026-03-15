@@ -8,4 +8,4 @@ tacacs_server_group: "TACACS-SERVERS"
 # Timeout for each TACACS+ server (seconds)
 tacacs_timeout: 3
 
-# ios_version is set per inventory group (12 or 16) — do not set here
+# ios_major, ios_minor, ios_branch are auto-detected in 1_preflight — do not set here

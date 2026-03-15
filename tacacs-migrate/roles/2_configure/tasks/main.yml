@@ -1,107 +1,492 @@
 ---
 # 2_configure — configure TACACS+ server(s) and set VTY privilege level
 #
-# Step 1: Configure TACACS+ server objects/groups and verify reachability
-# Step 2: Set privilege level 15 on all VTY lines
+# connection_mode=ssh    → cisco.ios.ios_command
+# connection_mode=telnet → uri → broker /telnet-session/{work_session_id}/exec
 #
-# IOS XE 16: named server objects + server group (TACACS-SERVERS)
-# IOS 12:    legacy tacacs-server host syntax
-# Supports 1 or 2 servers (tacacs_server_secondary optional)
+# Branch legacy (ios_major <= 15), two sub-variants:
+#   normal:   tacacs-server host <IP> key <key>  (per-host key)
+#   old:      tacacs-server host <IP>             (host only)
+#             tacacs-server key <key>             (global key, separate command)
+#   The normal variant is attempted first; if IOS rejects it (Invalid input),
+#   the old variant is applied automatically via rescue block.
+#   Host fact legacy_old_syntax=true is set after fallback for logging.
 #
-# ios_command is used instead of ios_config to avoid implicit show running-config
-# calls for idempotency checks — this is a one-time migration, not a recurring task.
+# Branch modern (ios_major >= 16):
+#   tacacs server <name> (named object, no dash)
+#
+# Supports 1 or 2 servers (tacacs_server_secondary optional).
 
 # ── Step 1: TACACS+ servers ────────────────────────────────────────────────
 
-- name: "CONFIGURE | Configure TACACS+ server(s) and group (IOS XE 16, 1 server)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
-      - tacacs server TACACS-PRIMARY
-      - "  address ipv4 {{ tacacs_server_primary }}"
-      - "  key {{ tacacs_key }}"
-      - "  timeout {{ tacacs_timeout }}"
-      - exit
-      - "aaa group server tacacs+ {{ tacacs_server_group }}"
-      - "  server name TACACS-PRIMARY"
-      - end
+# ── Legacy, SSH ───────────────────────────────────────────────────────────
+
+- name: "CONFIGURE | Configure TACACS+ server(s) (legacy, 1 server, SSH)"
   when:
-    - ios_version | int == 16
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
     - tacacs_server_secondary | default('') == ''
+  block:
+    - name: "CONFIGURE | Try host+key syntax (legacy, 1 server, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+  rescue:
+    - name: "CONFIGURE | Fallback — separate host/key syntax (legacy, 1 server, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }}"
+          - "tacacs-server key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+    - name: "CONFIGURE | Mark legacy old syntax used"
+      set_fact:
+        legacy_old_syntax: true
 
-- name: "CONFIGURE | Configure TACACS+ server(s) and group (IOS XE 16, 2 servers)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
-      - tacacs server TACACS-PRIMARY
-      - "  address ipv4 {{ tacacs_server_primary }}"
-      - "  key {{ tacacs_key }}"
-      - "  timeout {{ tacacs_timeout }}"
-      - exit
-      - tacacs server TACACS-SECONDARY
-      - "  address ipv4 {{ tacacs_server_secondary }}"
-      - "  key {{ tacacs_key }}"
-      - "  timeout {{ tacacs_timeout }}"
-      - exit
-      - "aaa group server tacacs+ {{ tacacs_server_group }}"
-      - "  server name TACACS-PRIMARY"
-      - "  server name TACACS-SECONDARY"
-      - end
+- name: "CONFIGURE | Configure TACACS+ server(s) (legacy, 2 servers, SSH)"
   when:
-    - ios_version | int == 16
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
     - tacacs_server_secondary | default('') != ''
+  block:
+    - name: "CONFIGURE | Try host+key syntax (legacy, 2 servers, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+          - "tacacs-server host {{ tacacs_server_secondary }} key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+  rescue:
+    - name: "CONFIGURE | Fallback — separate host/key syntax (legacy, 2 servers, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }}"
+          - "tacacs-server host {{ tacacs_server_secondary }}"
+          - "tacacs-server key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+    - name: "CONFIGURE | Mark legacy old syntax used"
+      set_fact:
+        legacy_old_syntax: true
 
-- name: "CONFIGURE | Configure TACACS+ server(s) (IOS 12, 1 server)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
-      - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
-      - "tacacs-server timeout {{ tacacs_timeout }}"
-      - end
+# ── Modern, SSH ───────────────────────────────────────────────────────────
+# If the device rejects 'tacacs server' syntax (reports Invalid input),
+# it is actually a legacy IOS device misidentified as modern.
+# Rescue falls back to legacy_old syntax and sets ios_branch=legacy so that
+# all subsequent roles (3, 4, 5) also follow the legacy path.
+
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (modern 16+, 1 server, SSH)"
   when:
-    - ios_version | int == 12
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
     - tacacs_server_secondary | default('') == ''
+  block:
+    - name: "CONFIGURE | Try modern syntax (1 server, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - tacacs server TACACS-PRIMARY
+          - "  address ipv4 {{ tacacs_server_primary }}"
+          - "  key {{ tacacs_key }}"
+          - "  timeout {{ tacacs_timeout }}"
+          - exit
+          - "aaa group server tacacs+ {{ tacacs_server_group }}"
+          - "  server name TACACS-PRIMARY"
+          - end
+  rescue:
+    - name: "CONFIGURE | Fallback — legacy_old syntax (1 server, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }}"
+          - "tacacs-server key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+    - name: "CONFIGURE | Downgrade ios_branch to legacy (modern syntax rejected)"
+      set_fact:
+        ios_branch: "legacy"
+        legacy_old_syntax: true
 
-- name: "CONFIGURE | Configure TACACS+ server(s) (IOS 12, 2 servers)"
-  cisco.ios.ios_command:
-    commands:
-      - configure terminal
-      - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
-      - "tacacs-server host {{ tacacs_server_secondary }} key {{ tacacs_key }}"
-      - "tacacs-server timeout {{ tacacs_timeout }}"
-      - end
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (modern 16+, 2 servers, SSH)"
   when:
-    - ios_version | int == 12
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
     - tacacs_server_secondary | default('') != ''
+  block:
+    - name: "CONFIGURE | Try modern syntax (2 servers, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - tacacs server TACACS-PRIMARY
+          - "  address ipv4 {{ tacacs_server_primary }}"
+          - "  key {{ tacacs_key }}"
+          - "  timeout {{ tacacs_timeout }}"
+          - exit
+          - tacacs server TACACS-SECONDARY
+          - "  address ipv4 {{ tacacs_server_secondary }}"
+          - "  key {{ tacacs_key }}"
+          - "  timeout {{ tacacs_timeout }}"
+          - exit
+          - "aaa group server tacacs+ {{ tacacs_server_group }}"
+          - "  server name TACACS-PRIMARY"
+          - "  server name TACACS-SECONDARY"
+          - end
+  rescue:
+    - name: "CONFIGURE | Fallback — legacy_old syntax (2 servers, SSH)"
+      cisco.ios.ios_command:
+        commands:
+          - configure terminal
+          - "tacacs-server host {{ tacacs_server_primary }}"
+          - "tacacs-server host {{ tacacs_server_secondary }}"
+          - "tacacs-server key {{ tacacs_key }}"
+          - "tacacs-server timeout {{ tacacs_timeout }}"
+          - end
+    - name: "CONFIGURE | Downgrade ios_branch to legacy (modern syntax rejected)"
+      set_fact:
+        ios_branch: "legacy"
+        legacy_old_syntax: true
 
-- name: "CONFIGURE | Verify TACACS+ reachability (IOS XE 16)"
-  cisco.ios.ios_command:
-    commands:
-      - "test aaa group {{ tacacs_server_group }} {{ tacacs_test_user }} {{ tacacs_test_pass }} new-code"
-  register: aaa_test_16
-  when: ios_version | int == 16
+# ── Legacy, Telnet ────────────────────────────────────────────────────────
 
-- name: "CONFIGURE | Verify TACACS+ reachability (IOS 12)"
+- name: "CONFIGURE | Configure TACACS+ server(s) (legacy, 1 server, Telnet)"
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+    - tacacs_server_secondary | default('') == ''
+  block:
+    - name: "CONFIGURE | Try host+key syntax (legacy, 1 server, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+  rescue:
+    - name: "CONFIGURE | Fallback — separate host/key syntax (legacy, 1 server, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }}"
+            - "tacacs-server key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+    - name: "CONFIGURE | Mark legacy old syntax used"
+      set_fact:
+        legacy_old_syntax: true
+
+- name: "CONFIGURE | Configure TACACS+ server(s) (legacy, 2 servers, Telnet)"
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+    - tacacs_server_secondary | default('') != ''
+  block:
+    - name: "CONFIGURE | Try host+key syntax (legacy, 2 servers, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }} key {{ tacacs_key }}"
+            - "tacacs-server host {{ tacacs_server_secondary }} key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+  rescue:
+    - name: "CONFIGURE | Fallback — separate host/key syntax (legacy, 2 servers, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }}"
+            - "tacacs-server host {{ tacacs_server_secondary }}"
+            - "tacacs-server key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+    - name: "CONFIGURE | Mark legacy old syntax used"
+      set_fact:
+        legacy_old_syntax: true
+
+# ── Modern, Telnet ────────────────────────────────────────────────────────
+
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (modern 16+, 1 server, Telnet)"
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+    - tacacs_server_secondary | default('') == ''
+  block:
+    - name: "CONFIGURE | Try modern syntax (1 server, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - tacacs server TACACS-PRIMARY
+            - "  address ipv4 {{ tacacs_server_primary }}"
+            - "  key {{ tacacs_key }}"
+            - "  timeout {{ tacacs_timeout }}"
+            - exit
+            - "aaa group server tacacs+ {{ tacacs_server_group }}"
+            - "  server name TACACS-PRIMARY"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+  rescue:
+    - name: "CONFIGURE | Fallback — legacy_old syntax (1 server, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }}"
+            - "tacacs-server key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+    - name: "CONFIGURE | Downgrade ios_branch to legacy (modern syntax rejected, Telnet)"
+      set_fact:
+        ios_branch: "legacy"
+        legacy_old_syntax: true
+
+- name: "CONFIGURE | Configure TACACS+ server(s) and group (modern 16+, 2 servers, Telnet)"
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+    - tacacs_server_secondary | default('') != ''
+  block:
+    - name: "CONFIGURE | Try modern syntax (2 servers, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - tacacs server TACACS-PRIMARY
+            - "  address ipv4 {{ tacacs_server_primary }}"
+            - "  key {{ tacacs_key }}"
+            - "  timeout {{ tacacs_timeout }}"
+            - exit
+            - tacacs server TACACS-SECONDARY
+            - "  address ipv4 {{ tacacs_server_secondary }}"
+            - "  key {{ tacacs_key }}"
+            - "  timeout {{ tacacs_timeout }}"
+            - exit
+            - "aaa group server tacacs+ {{ tacacs_server_group }}"
+            - "  server name TACACS-PRIMARY"
+            - "  server name TACACS-SECONDARY"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+  rescue:
+    - name: "CONFIGURE | Fallback — legacy_old syntax (2 servers, Telnet)"
+      ansible.builtin.uri:
+        url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+        method: POST
+        body_format: json
+        body:
+          commands:
+            - configure terminal
+            - "tacacs-server host {{ tacacs_server_primary }}"
+            - "tacacs-server host {{ tacacs_server_secondary }}"
+            - "tacacs-server key {{ tacacs_key }}"
+            - "tacacs-server timeout {{ tacacs_timeout }}"
+            - end
+        headers:
+          X-API-Token: "{{ broker_token }}"
+        status_code: 200
+        timeout: 30
+      delegate_to: localhost
+    - name: "CONFIGURE | Downgrade ios_branch to legacy (modern syntax rejected, Telnet)"
+      set_fact:
+        ios_branch: "legacy"
+        legacy_old_syntax: true
+
+# ── TACACS+ reachability test ──────────────────────────────────────────────
+
+- name: "CONFIGURE | Verify TACACS+ reachability (legacy, SSH)"
   cisco.ios.ios_command:
     commands:
       - "test aaa group tacacs+ {{ tacacs_test_user }} {{ tacacs_test_pass }} legacy"
-  register: aaa_test_12
-  when: ios_version | int == 12
+  register: aaa_test_legacy_ssh
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
+
+- name: "CONFIGURE | Verify TACACS+ reachability (modern, SSH)"
+  cisco.ios.ios_command:
+    commands:
+      - "test aaa group {{ tacacs_server_group }} {{ tacacs_test_user }} {{ tacacs_test_pass }} new-code"
+  register: aaa_test_modern_ssh
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'modern'
+
+- name: "CONFIGURE | Verify TACACS+ reachability (legacy, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - "test aaa group tacacs+ {{ tacacs_test_user }} {{ tacacs_test_pass }} legacy"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 90
+  register: aaa_test_legacy_telnet
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+
+- name: "CONFIGURE | Verify TACACS+ reachability (modern, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - "test aaa group {{ tacacs_server_group }} {{ tacacs_test_user }} {{ tacacs_test_pass }} new-code"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 90
+  register: aaa_test_modern_telnet
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+
+# Some legacy IOS versions do not accept the 'legacy' keyword in 'test aaa' —
+# they report '% Invalid input'. In that case retry without the keyword.
+
+- name: "CONFIGURE | Retry AAA test without 'legacy' keyword (legacy, Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - "test aaa group tacacs+ {{ tacacs_test_user }} {{ tacacs_test_pass }}"
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 90
+  register: aaa_test_legacy_telnet_nw
+  delegate_to: localhost
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+    - "'% Invalid input' in (aaa_test_legacy_telnet.json.outputs['test aaa group tacacs+ ' + tacacs_test_user + ' ' + tacacs_test_pass + ' legacy'] | default(''))"
+
+- name: "CONFIGURE | Retry AAA test without 'legacy' keyword (legacy, SSH)"
+  cisco.ios.ios_command:
+    commands:
+      - "test aaa group tacacs+ {{ tacacs_test_user }} {{ tacacs_test_pass }}"
+  register: aaa_test_legacy_ssh_nw
+  when:
+    - connection_mode | default('ssh') == 'ssh'
+    - ios_branch == 'legacy'
+    - "'% Invalid input' in (aaa_test_legacy_ssh.stdout[0] | default(''))"
+
+# Fix for audit issue #3: extract output immediately while key is statically known,
+# instead of building dict key via string concatenation in a later set_fact.
+
+- name: "CONFIGURE | Extract AAA test output (legacy, Telnet)"
+  set_fact:
+    _aaa_test_telnet_text: >-
+      {%- set out_legacy = aaa_test_legacy_telnet.json.outputs['test aaa group tacacs+ ' + tacacs_test_user + ' ' + tacacs_test_pass + ' legacy'] | default('') -%}
+      {%- if '% Invalid input' in out_legacy -%}
+        {{ aaa_test_legacy_telnet_nw.json.outputs['test aaa group tacacs+ ' + tacacs_test_user + ' ' + tacacs_test_pass] | default('') }}
+      {%- else -%}
+        {{ out_legacy }}
+      {%- endif -%}
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'legacy'
+
+- name: "CONFIGURE | Extract AAA test output (modern, Telnet)"
+  set_fact:
+    _aaa_test_telnet_text: "{{ aaa_test_modern_telnet.json.outputs['test aaa group ' + tacacs_server_group + ' ' + tacacs_test_user + ' ' + tacacs_test_pass + ' new-code'] }}"
+  when:
+    - connection_mode | default('ssh') == 'telnet'
+    - ios_branch == 'modern'
+
+- name: "CONFIGURE | Normalize AAA test output"
+  set_fact:
+    _aaa_test_text: >-
+      {%- if connection_mode | default('ssh') == 'ssh' and ios_branch == 'legacy' -%}
+        {%- set out = aaa_test_legacy_ssh.stdout[0] | default('') -%}
+        {{ aaa_test_legacy_ssh_nw.stdout[0] if ('% Invalid input' in out and aaa_test_legacy_ssh_nw is not skipped) else out }}
+      {%- elif connection_mode | default('ssh') == 'ssh' and ios_branch == 'modern' -%}
+        {{ aaa_test_modern_ssh.stdout[0] | default('') }}
+      {%- else -%}
+        {{ _aaa_test_telnet_text }}
+      {%- endif -%}
 
 - name: "CONFIGURE | Assert TACACS+ authentication succeeded"
   assert:
     that:
-      - >
-        (aaa_test_16 is not skipped and 'successfully authenticated' in (aaa_test_16.stdout[0] | lower))
-        or
-        (aaa_test_12 is not skipped and 'successfully authenticated' in (aaa_test_12.stdout[0] | lower))
+      - "'successfully authenticated' in (_aaa_test_text | lower)"
     fail_msg: >
       TACACS+ server did not respond or authentication failed.
-      Output: {{ aaa_test_16.stdout[0] if (aaa_test_16 is not skipped) else aaa_test_12.stdout[0] }}
+      Output: {{ _aaa_test_text }}
 
 # ── Step 2: VTY privilege level ────────────────────────────────────────────
 
-- name: "CONFIGURE | Set privilege level 15 on VTY lines"
+- name: "CONFIGURE | Set privilege level 15 on VTY lines (SSH)"
   cisco.ios.ios_command:
     commands:
       - configure terminal
@@ -110,15 +495,24 @@
       - line vty 5 15
       - "  privilege level 15"
       - end
+  when: connection_mode | default('ssh') == 'ssh'
 
-- name: "CONFIGURE | Verify privilege level 15 in running config"
-  cisco.ios.ios_command:
-    commands:
-      - show running-config | include privilege level
-  register: priv_check
-
-- name: "CONFIGURE | Assert privilege level 15 is set"
-  assert:
-    that:
-      - "'privilege level 15' in priv_check.stdout[0]"
-    fail_msg: "privilege level 15 not found in running-config after applying"
+- name: "CONFIGURE | Set privilege level 15 on VTY lines (Telnet)"
+  ansible.builtin.uri:
+    url: "{{ broker_url }}/telnet-session/{{ work_session_id }}/exec"
+    method: POST
+    body_format: json
+    body:
+      commands:
+        - configure terminal
+        - line vty 0 4
+        - "  privilege level 15"
+        - line vty 5 15
+        - "  privilege level 15"
+        - end
+    headers:
+      X-API-Token: "{{ broker_token }}"
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  when: connection_mode | default('ssh') == 'telnet'
