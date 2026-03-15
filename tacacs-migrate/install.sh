@@ -173,21 +173,21 @@ check_dependencies() {
         fi
     fi
 
-    # ssh-broker check — warning only, not a hard requirement
+    # netdev-broker check — warning only, not a hard requirement
     local broker_ok=false
-    if [[ -f "/opt/ssh-broker/.installed" ]]; then
-        ok "ssh-broker: installed at /opt/ssh-broker"
+    if [[ -f "/opt/netdev-broker/.installed" ]]; then
+        ok "netdev-broker: installed at /opt/netdev-broker"
         broker_ok=true
     elif command -v curl &>/dev/null; then
         local _br_url="${BROKER_URL:-http://127.0.0.1:8765}"
         if curl -sf --max-time 2 "${_br_url}/health" &>/dev/null; then
-            ok "ssh-broker: running at ${_br_url}"
+            ok "netdev-broker: running at ${_br_url}"
             broker_ok=true
         fi
     fi
     if [[ "$broker_ok" == false ]]; then
-        warn "ssh-broker not detected — safety session rollback will not be available."
-        warn "Install ssh-broker before running migration, or configure broker settings later:"
+        warn "netdev-broker not detected — safety session rollback will not be available."
+        warn "Install netdev-broker before running migration, or configure broker settings later:"
         warn "  $0 configure-broker"
     fi
 
@@ -435,14 +435,14 @@ configure_test_user() {
 # =============================================================
 
 configure_broker() {
-    header "Configure ssh-broker safety session"
-    info "ssh-broker provides a persistent SSH safety session for rollback."
+    header "Configure netdev-broker safety session"
+    info "netdev-broker provides a persistent SSH safety session for rollback."
     info "It must be running on this controller before migration starts."
     echo
 
     local default_url="${BROKER_URL:-http://127.0.0.1:8765}"
-    prompt BROKER_URL   "ssh-broker URL"       "$default_url"
-    prompt_secret BROKER_TOKEN "ssh-broker API token"
+    prompt BROKER_URL   "netdev-broker URL"       "$default_url"
+    prompt_secret BROKER_TOKEN "netdev-broker API token"
 
     if [[ -z "${BROKER_TOKEN:-}" ]]; then
         die "Aborted: broker API token is required and cannot be empty."
@@ -452,10 +452,10 @@ configure_broker() {
     echo
     if command -v curl &>/dev/null; then
         if curl -sf --max-time 3 "${BROKER_URL}/health" &>/dev/null; then
-            ok "ssh-broker is reachable at ${BROKER_URL}"
+            ok "netdev-broker is reachable at ${BROKER_URL}"
         else
-            warn "Could not reach ssh-broker at ${BROKER_URL}"
-            warn "Make sure ssh-broker is running before executing the migration."
+            warn "Could not reach netdev-broker at ${BROKER_URL}"
+            warn "Make sure netdev-broker is running before executing the migration."
         fi
     fi
 
@@ -485,7 +485,7 @@ create_and_encrypt_vault() {
 # To edit: ansible-vault edit ${VAULT_FILE_REL}
 # To view: ansible-vault view ${VAULT_FILE_REL}
 
-# ssh-broker safety session
+# netdev-broker safety session
 broker_url:   "${BROKER_URL:-http://127.0.0.1:8765}"
 broker_token: "${BROKER_TOKEN:-}"
 
@@ -707,7 +707,7 @@ do_configure() {
 }
 
 do_configure_broker() {
-    header "Configure ssh-broker in vault"
+    header "Configure netdev-broker in vault"
 
     local vf; vf="$(vault_file)"
     [[ -f "$vf" ]] || die "vault.yml not found. Run 'configure-vault' first."
@@ -738,7 +738,7 @@ do_configure_broker() {
         sed -i "s|^broker_url:.*|broker_url:   \"${BROKER_URL}\"|" "$tmp"
         sed -i "s|^broker_token:.*|broker_token: \"${BROKER_TOKEN}\"|" "$tmp"
     else
-        printf '\n# ssh-broker safety session\nbroker_url:   "%s"\nbroker_token: "%s"\n' \
+        printf '\n# netdev-broker safety session\nbroker_url:   "%s"\nbroker_token: "%s"\n' \
             "${BROKER_URL}" "${BROKER_TOKEN}" >> "$tmp"
     fi
 
@@ -833,15 +833,15 @@ do_run() {
     local vf; vf="$(vault_file)"
     [[ -f "$vf" ]] || die "vault.yml not found. Run: $0 configure-vault"
 
-    # ssh-broker pre-flight check
+    # netdev-broker pre-flight check
     local _broker_url="${BROKER_URL:-http://127.0.0.1:8765}"
     if command -v curl &>/dev/null; then
         if curl -sf --max-time 2 "${_broker_url}/health" &>/dev/null; then
-            ok "ssh-broker: reachable at ${_broker_url}"
+            ok "netdev-broker: reachable at ${_broker_url}"
         else
-            warn "ssh-broker is NOT reachable at ${_broker_url}"
+            warn "netdev-broker is NOT reachable at ${_broker_url}"
             warn "Migration will abort per-host at phase 0 (broker open)."
-            warn "Start ssh-broker or configure broker settings: $0 configure-broker"
+            warn "Start netdev-broker or configure broker settings: $0 configure-broker"
             echo
             if ! confirm "Continue anyway?"; then info "Aborted."; return; fi
         fi
@@ -969,7 +969,7 @@ menu_installed() {
         echo "  2) Configure everything (hosts + vault)"
         echo "  3) Configure switches (inventory) only"
         echo "  4) Configure TACACS+ secrets only (recreate vault)"
-        echo "  5) Configure ssh-broker settings (update vault)"
+        echo "  5) Configure netdev-broker settings (update vault)"
         echo "  6) Change vault password"
         echo "  7) Status"
         echo "  8) Uninstall"
@@ -1053,7 +1053,7 @@ case "$ACTION" in
             echo "  configure                  Configure hosts + secrets (full setup)"
             echo "  configure-hosts            Configure switch inventory only"
             echo "  configure-vault            Configure TACACS+ secrets (recreate vault)"
-            echo "  configure-broker           Configure ssh-broker URL and token (update vault)"
+            echo "  configure-broker           Configure netdev-broker URL and token (update vault)"
             echo "  configure-vault-password   Change vault encryption password"
             echo "  run [--limit HOST] [args]  Run migration playbook"
             echo "  status                     Show current configuration"

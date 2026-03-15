@@ -1,5 +1,5 @@
 ---
-# 0_broker_open — open ssh-broker safety session before migration starts
+# 0_broker_open — open netdev-broker safety session before migration starts
 #
 # Tries SSH first (/session). Falls back to Telnet (/telnet-session) if SSH
 # fails (device may only have Telnet access). Aborts host if both fail.
@@ -21,7 +21,7 @@
 #   local_enable           — enable password for Telnet sessions (default: '')
 #   broker_session_timeout — idle timeout in seconds for this session (default: 600)
 
-- name: "BROKER | Try SSH safety session via ssh-broker"
+- name: "BROKER | Try SSH safety session via netdev-broker"
   ansible.builtin.uri:
     url: "{{ broker_url }}/session"
     method: POST
@@ -40,7 +40,7 @@
   delegate_to: localhost
   failed_when: false
 
-- name: "BROKER | Try Telnet safety session via ssh-broker (SSH failed)"
+- name: "BROKER | Try Telnet safety session via netdev-broker (SSH failed)"
   ansible.builtin.uri:
     url: "{{ broker_url }}/telnet-session"
     method: POST

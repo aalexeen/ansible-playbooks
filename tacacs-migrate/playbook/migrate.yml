@@ -9,7 +9,7 @@
 #
 # Safety session model:
 #   Before any changes, 0_broker_open opens a persistent SSH session to the
-#   device via ssh-broker using local credentials. This session is independent
+#   device via netdev-broker using local credentials. This session is independent
 #   of Ansible's network_cli connection and survives AAA changes.
 #   If any migration step fails, the rescue block sends rollback commands
 #   directly through the broker session and then closes it.
@@ -59,7 +59,7 @@
       run_once: true
 
     # ── Catch unreachable hosts before the main block ─────────────────────
-    # Probe via ssh-broker TCP check (SSH port 22 first, then Telnet port 23).
+    # Probe via netdev-broker TCP check (SSH port 22 first, then Telnet port 23).
     # This avoids a network_cli SSH connection attempt that would always fail
     # for Telnet-only devices and produce a misleading UNREACHABLE log entry.
 
@@ -159,7 +159,7 @@
     - name: "MIGRATE | Run migration with rollback protection"
       block:
 
-        - name: "MIGRATE | Phase 0 — open ssh-broker safety session"
+        - name: "MIGRATE | Phase 0 — open netdev-broker safety session"
           import_role:
             name: 0_broker_open
 
@@ -197,7 +197,7 @@
               Failed task : {{ ansible_failed_task.name | default('unknown') }}
               Error       : {{ ansible_failed_result.msg | default(ansible_failed_result) }}
 
-        # ── Rollback via ssh-broker safety session ─────────────────────────
+        # ── Rollback via netdev-broker safety session ─────────────────────────
         # Commands are sent through the broker session opened before migration.
         # This session uses local credentials and is independent of any AAA
         # changes that may have been applied to the device.
